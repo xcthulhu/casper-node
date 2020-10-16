@@ -103,6 +103,12 @@ pub enum Error {
     OutOfMemory,
 }
 
+impl std::error::Error for Error {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
+        None
+    }
+}
+
 #[cfg(not(feature = "no-unstable-features"))]
 impl From<TryReserveError> for Error {
     fn from(_: TryReserveError) -> Error {

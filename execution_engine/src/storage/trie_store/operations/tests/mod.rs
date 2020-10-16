@@ -23,11 +23,15 @@ use crate::storage::{
         self,
         in_memory::InMemoryTrieStore,
         lmdb::LmdbTrieStore,
-        operations::{self, read, write, ReadResult, WriteResult},
+        operations::{
+            self, merkle_proof::TrieMerkleProof, read, read_with_proof, write, ReadResult,
+            WriteResult,
+        },
         TrieStore,
     },
     DEFAULT_TEST_MAX_DB_SIZE,
 };
+use std::ops::Not;
 
 const TEST_KEY_LENGTH: usize = 7;
 
@@ -594,6 +598,45 @@ where
     Ok(ret)
 }
 
+/// For a given vector of leaves check the merkle proofs exist and are correct
+fn check_merkle_proofs<K, V, T, S, E>(
+    correlation_id: CorrelationId,
+    txn: &T,
+    store: &S,
+    root: &Blake2bHash,
+    leaves: &[Trie<K, V>],
+) -> Result<Vec<bool>, E>
+where
+    K: ToBytes + FromBytes + Eq + std::fmt::Debug + Copy,
+    V: ToBytes + FromBytes + Eq + Copy,
+    T: Readable<Handle = S::Handle>,
+    S: TrieStore<K, V>,
+    S::Error: From<T::Error>,
+    E: From<S::Error> + From<bytesrepr::Error>,
+{
+    let mut ret = Vec::new();
+
+    for leaf in leaves {
+        if let Trie::Leaf { key, value } = leaf {
+            let maybe_proof: ReadResult<TrieMerkleProof<K, V>> =
+                read_with_proof::<_, _, _, _, E>(correlation_id, txn, store, root, key)?;
+            match maybe_proof {
+                ReadResult::Found(proof) => {
+                    let hash = proof.compute_state_hash().expect("Could not compute hash"); // TODO: Coerce error
+                    ret.push(hash == *root && proof.value() == value);
+                }
+                ReadResult::NotFound => {
+                    ret.push(false);
+                }
+                ReadResult::RootNotFound => panic!("Root not found!"),
+            };
+        } else {
+            panic!("leaves should only contain leaves")
+        }
+    }
+    Ok(ret)
+}
+
 fn check_keys<K, V, T, S, E>(
     correlation_id: CorrelationId,
     txn: &T,
@@ -637,7 +680,7 @@ fn check_leaves<'a, K, V, R, S, E>(
     absent: &[Trie<K, V>],
 ) -> Result<(), E>
 where
-    K: ToBytes + FromBytes + Eq + std::fmt::Debug + Clone + Ord,
+    K: ToBytes + FromBytes + Eq + std::fmt::Debug + Copy + Clone + Ord,
     V: ToBytes + FromBytes + Eq + std::fmt::Debug + Copy,
     R: TransactionSource<'a, Handle = S::Handle>,
     S: TrieStore<K, V>,
@@ -653,9 +696,21 @@ where
     );
 
     assert!(
+        check_merkle_proofs::<_, _, _, _, E>(correlation_id, &txn, store, root, present)?
+            .into_iter()
+            .all(convert::identity)
+    );
+
+    assert!(
         check_leaves_exist::<_, _, _, _, E>(correlation_id, &txn, store, root, absent)?
             .into_iter()
-            .all(|b| !b)
+            .all(bool::not)
+    );
+
+    assert!(
+        check_merkle_proofs::<_, _, _, _, E>(correlation_id, &txn, store, root, absent)?
+            .into_iter()
+            .all(bool::not)
     );
 
     assert!(check_keys::<_, _, _, _, E>(
@@ -802,7 +857,7 @@ fn writes_to_n_leaf_empty_trie_had_expected_results<'a, K, V, R, S, E>(
     test_leaves: &[Trie<K, V>],
 ) -> Result<Vec<Blake2bHash>, E>
 where
-    K: ToBytes + FromBytes + Clone + Eq + std::fmt::Debug + Ord,
+    K: ToBytes + FromBytes + Clone + Eq + std::fmt::Debug + Copy + Ord,
     V: ToBytes + FromBytes + Clone + Eq + std::fmt::Debug + Copy,
     R: TransactionSource<'a, Handle = S::Handle>,
     S: TrieStore<K, V>,

@@ -1,3 +1,5 @@
+mod merkle_proof;
+
 #[cfg(test)]
 mod tests;
 
@@ -10,7 +12,10 @@ use crate::{
     storage::{
         transaction_source::{Readable, Writable},
         trie::{Parents, Pointer, Trie, RADIX},
-        trie_store::TrieStore,
+        trie_store::{
+            operations::merkle_proof::{TrieMerkleProof, TrieMerkleProofStep},
+            TrieStore,
+        },
     },
 };
 
@@ -107,6 +112,102 @@ where
                 } else {
                     return Ok(ReadResult::NotFound);
                 }
+            }
+        }
+    }
+}
+
+pub fn read_with_proof<K, V, T, S, E>(
+    _correlation_id: CorrelationId,
+    txn: &T,
+    store: &S,
+    root: &Blake2bHash,
+    key: &K,
+) -> Result<ReadResult<TrieMerkleProof<K, V>>, E>
+where
+    K: ToBytes + FromBytes + Eq + std::fmt::Debug,
+    V: ToBytes + FromBytes,
+    T: Readable<Handle = S::Handle>,
+    S: TrieStore<K, V>,
+    S::Error: From<T::Error>,
+    E: From<S::Error> + From<bytesrepr::Error>,
+{
+    let mut proof_steps = VecDeque::new();
+    let path: Vec<u8> = key.to_bytes()?;
+
+    let mut depth: usize = 0;
+    let mut current: Trie<K, V> = match store.get(txn, root)? {
+        Some(root) => root,
+        None => return Ok(ReadResult::RootNotFound),
+    };
+    loop {
+        match current {
+            Trie::Leaf {
+                key: leaf_key,
+                value,
+            } => {
+                if *key != leaf_key {
+                    return Ok(ReadResult::NotFound);
+                }
+                let key = leaf_key;
+                return Ok(ReadResult::Found(TrieMerkleProof::new(
+                    key,
+                    value,
+                    proof_steps,
+                )));
+            }
+            Trie::Node { pointer_block } => {
+                let hole_index: usize = {
+                    assert!(depth < path.len(), "depth must be < {}", path.len());
+                    path[depth].into()
+                };
+                let pointer: Pointer = {
+                    assert!(hole_index < RADIX, "key length must be < {}", RADIX);
+                    match pointer_block[hole_index] {
+                        Some(pointer) => pointer,
+                        None => return Ok(ReadResult::NotFound),
+                    }
+                };
+                let indexed_pointers_with_hole = pointer_block
+                    .to_indexed_pointers()
+                    .filter(|(index, _)| *index != hole_index)
+                    .collect();
+                let next = match store.get(txn, pointer.hash())? {
+                    Some(next) => next,
+                    None => {
+                        panic!(
+                            "No trie value at key: {:?} (reading from key: {:?})",
+                            pointer.hash(),
+                            key
+                        );
+                    }
+                };
+                depth += 1;
+                current = next;
+                proof_steps.push_front(TrieMerkleProofStep::node(
+                    hole_index,
+                    indexed_pointers_with_hole,
+                ));
+            }
+            Trie::Extension { affix, pointer } => {
+                let sub_path = &path[depth..depth + affix.len()];
+                if sub_path != affix.as_slice() {
+                    return Ok(ReadResult::NotFound);
+                };
+
+                let next = match store.get(txn, pointer.hash())? {
+                    Some(next) => next,
+                    None => {
+                        panic!(
+                            "No trie value at key: {:?} (reading from key: {:?})",
+                            pointer.hash(),
+                            key
+                        );
+                    }
+                };
+                depth += affix.len();
+                current = next;
+                proof_steps.push_front(TrieMerkleProofStep::extension(affix));
             }
         }
     }

@@ -90,6 +90,15 @@ impl PointerBlock {
         }
         ret
     }
+
+    pub fn to_indexed_pointers(&self) -> impl Iterator<Item = (usize, Pointer)> + '_ {
+        self.0
+            .iter()
+            .enumerate()
+            .filter_map(|(index, maybe_pointer)| {
+                maybe_pointer.map(|value| (index, value.to_owned()))
+            })
+    }
 }
 
 impl From<[Option<Pointer>; RADIX]> for PointerBlock {
