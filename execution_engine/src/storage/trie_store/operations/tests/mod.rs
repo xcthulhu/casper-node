@@ -767,6 +767,41 @@ where
     Ok(results)
 }
 
+fn check_pairs_proofs<'a, K, V, R, S, E>(
+    correlation_id: CorrelationId,
+    environment: &'a R,
+    store: &S,
+    root_hashes: &[Blake2bHash],
+    pairs: &[(K, V)],
+) -> Result<bool, E>
+where
+    K: ToBytes + FromBytes + Eq + std::fmt::Debug + Copy + Clone + Ord,
+    V: ToBytes + FromBytes + Eq + std::fmt::Debug + Copy,
+    R: TransactionSource<'a, Handle = S::Handle>,
+    S: TrieStore<K, V>,
+    S::Error: From<R::Error>,
+    E: From<R::Error> + From<S::Error> + From<bytesrepr::Error>,
+{
+    let txn = environment.create_read_txn()?;
+    for (index, root_hash) in root_hashes.iter().enumerate() {
+        for (key, value) in &pairs[..=index] {
+            let maybe_proof =
+                read_with_proof::<_, _, _, _, E>(correlation_id, &txn, store, root_hash, key)?;
+            match maybe_proof {
+                ReadResult::Found(proof) => {
+                    let hash = proof.compute_state_hash().expect("Could not compute hash"); // TODO: Coerce error
+                    if hash != *root_hash || proof.value() != value {
+                        return Ok(false);
+                    }
+                }
+                ReadResult::NotFound => return Ok(false),
+                ReadResult::RootNotFound => panic!("Root not found!"),
+            };
+        }
+    }
+    Ok(true)
+}
+
 fn check_pairs<'a, K, V, R, S, E>(
     correlation_id: CorrelationId,
     environment: &'a R,
