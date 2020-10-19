@@ -1,5 +1,3 @@
-mod merkle_proof;
-
 #[cfg(test)]
 mod tests;
 
@@ -11,11 +9,11 @@ use crate::{
     shared::newtypes::{Blake2bHash, CorrelationId},
     storage::{
         transaction_source::{Readable, Writable},
-        trie::{Parents, Pointer, Trie, RADIX},
-        trie_store::{
-            operations::merkle_proof::{TrieMerkleProof, TrieMerkleProofStep},
-            TrieStore,
+        trie::{
+            merkle_proof::{TrieMerkleProof, TrieMerkleProofStep},
+            Parents, Pointer, Trie, RADIX,
         },
+        trie_store::TrieStore,
     },
 };
 

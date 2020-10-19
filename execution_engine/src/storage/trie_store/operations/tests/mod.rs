@@ -18,15 +18,12 @@ use crate::storage::{
         in_memory::InMemoryEnvironment, lmdb::LmdbEnvironment, Readable, Transaction,
         TransactionSource,
     },
-    trie::{Pointer, Trie},
+    trie::{merkle_proof::TrieMerkleProof, Pointer, Trie},
     trie_store::{
         self,
         in_memory::InMemoryTrieStore,
         lmdb::LmdbTrieStore,
-        operations::{
-            self, merkle_proof::TrieMerkleProof, read, read_with_proof, write, ReadResult,
-            WriteResult,
-        },
+        operations::{self, read, read_with_proof, write, ReadResult, WriteResult},
         TrieStore,
     },
     DEFAULT_TEST_MAX_DB_SIZE,

@@ -6,6 +6,7 @@ use casper_types::bytesrepr::{self, FromBytes, ToBytes, U8_SERIALIZED_LENGTH};
 #[cfg(test)]
 pub mod gens;
 
+pub mod merkle_proof;
 #[cfg(test)]
 mod tests;
 
