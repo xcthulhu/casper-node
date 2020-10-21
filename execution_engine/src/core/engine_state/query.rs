@@ -3,6 +3,7 @@ use casper_types::Key;
 use crate::{
     core::tracking_copy::TrackingCopyQueryResult,
     shared::{newtypes::Blake2bHash, stored_value::StoredValue},
+    storage::trie::merkle_proof::TrieMerkleProof,
 };
 
 #[derive(Debug)]
@@ -10,7 +11,7 @@ pub enum QueryResult {
     RootNotFound,
     ValueNotFound(String),
     CircularReference(String),
-    Success(StoredValue),
+    Success(Vec<TrieMerkleProof<Key, StoredValue>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

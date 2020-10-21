@@ -25,12 +25,12 @@ use crate::{
         transform::{self, Transform},
         TypeMismatch,
     },
-    storage::global_state::StateReader,
+    storage::{global_state::StateReader, trie::merkle_proof::TrieMerkleProof},
 };
 
 #[derive(Debug)]
 pub enum TrackingCopyQueryResult {
-    Success(StoredValue),
+    Success(Vec<TrieMerkleProof<Key, StoredValue>>),
     ValueNotFound(String),
     CircularReference(String),
 }
@@ -345,20 +345,32 @@ impl<R: StateReader<Key, StoredValue>> TrackingCopy<R> {
     ) -> Result<TrackingCopyQueryResult, R::Error> {
         let mut query = Query::new(base_key, path);
 
+        let mut proofs = Vec::new();
+
         loop {
             if !query.visited_keys.insert(query.current_key) {
                 return Ok(query.into_circular_ref_result());
             }
-            let stored_value = match self.reader.read(correlation_id, &query.current_key)? {
+            let stored_value = match self
+                .reader
+                .read_with_proof(correlation_id, &query.current_key)?
+            {
                 None => {
                     return Ok(query.into_not_found_result("Failed to find base key"));
                 }
                 Some(stored_value) => stored_value,
             };
 
+            proofs.push(stored_value);
+
             if query.unvisited_names.is_empty() {
-                return Ok(TrackingCopyQueryResult::Success(stored_value));
+                return Ok(TrackingCopyQueryResult::Success(proofs));
             }
+
+            let stored_value: &StoredValue = proofs
+                .last()
+                .map(|r| r.value())
+                .expect("but we just pushed");
 
             match stored_value {
                 StoredValue::Account(account) => {
@@ -371,7 +383,7 @@ impl<R: StateReader<Key, StoredValue>> TrackingCopy<R> {
                     }
                 }
                 StoredValue::CLValue(cl_value) if cl_value.cl_type() == &CLType::Key => {
-                    if let Ok(key) = cl_value.into_t::<Key>() {
+                    if let Ok(key) = cl_value.to_owned().into_t::<Key>() {
                         query.current_key = key.normalize();
                     } else {
                         return Ok(query.into_not_found_result("Failed to parse CLValue as Key"));
@@ -426,5 +438,13 @@ impl<R: StateReader<Key, StoredValue>> StateReader<Key, StoredValue> for &Tracki
         } else {
             Ok(None)
         }
+    }
+
+    fn read_with_proof(
+        &self,
+        correlation_id: CorrelationId,
+        key: &Key,
+    ) -> Result<Option<TrieMerkleProof<Key, StoredValue>>, Self::Error> {
+        self.reader.read_with_proof(correlation_id, key)
     }
 }

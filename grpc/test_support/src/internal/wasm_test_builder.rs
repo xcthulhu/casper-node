@@ -56,6 +56,7 @@ use casper_types::{
 };
 
 use crate::internal::{utils, DEFAULT_PROTOCOL_VERSION};
+use casper_execution_engine::storage::trie::merkle_proof::TrieMerkleProof;
 
 /// LMDB initial map size is calculated based on DEFAULT_LMDB_PAGES and systems page size.
 ///
@@ -382,33 +383,23 @@ where
         if query_response.has_failure() {
             return Err(query_response.take_failure());
         }
-        bytesrepr::deserialize(query_response.take_success()).map_err(|err| format!("{}", err))
+
+        let mut merkle_proofs: Vec<TrieMerkleProof<Key, StoredValue>> =
+            bytesrepr::deserialize(query_response.take_success())
+                .map_err(|err| format!("{:?}", err))?;
+
+        let proof = merkle_proofs.pop().expect("should have at least one proof");
+
+        Ok(proof.into_value())
     }
 
     pub fn total_supply(&self, maybe_post_state: Option<Vec<u8>>) -> U512 {
-        let post_state = maybe_post_state
-            .or_else(|| self.post_state_hash.clone())
-            .expect("builder must have a post-state hash");
-
         let mint_key: Key = self
             .mint_contract_hash
             .expect("should have mint_contract_hash")
             .into();
 
-        let query_request =
-            create_query_request(post_state, mint_key, vec![TOTAL_SUPPLY_KEY.to_string()]);
-
-        let mut query_response = self
-            .engine_state
-            .query(RequestOptions::new(), query_request)
-            .wait_drop_metadata()
-            .expect("should get query response");
-
-        if query_response.has_failure() {
-            panic!("mint error: {}", query_response.take_failure());
-        }
-
-        let result = bytesrepr::deserialize(query_response.take_success());
+        let result = self.query(maybe_post_state, mint_key, &[TOTAL_SUPPLY_KEY]);
 
         let total_supply: U512 = if let Ok(StoredValue::CLValue(total_supply)) = result {
             total_supply.into_t().expect("total supply should be U512")

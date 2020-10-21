@@ -8,11 +8,13 @@ mod account;
 mod cl_value;
 mod execution_result;
 mod stored_value;
+mod trie_merkle_proof;
 
 pub use account::Account;
 pub use cl_value::CLValue;
 pub use execution_result::ExecutionResult;
 pub use stored_value::StoredValue;
+pub use trie_merkle_proof::TrieMerkleProof;
 
 fn convert_named_keys(named_keys: &BTreeMap<String, Key>) -> BTreeMap<String, String> {
     named_keys

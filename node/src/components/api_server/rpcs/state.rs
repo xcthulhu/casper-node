@@ -16,7 +16,7 @@ use casper_types::{Key, URef, U512};
 use super::{ApiRequest, Error, ErrorCode, ReactorEventT, RpcWithParams, RpcWithParamsExt};
 use crate::{
     components::api_server::CLIENT_API_VERSION, crypto::hash::Digest, effect::EffectBuilder,
-    reactor::QueueKind, types::json_compatibility::StoredValue,
+    reactor::QueueKind, types::json_compatibility::TrieMerkleProof,
 };
 
 /// Params for "state_get_item" RPC request.
@@ -36,7 +36,7 @@ pub struct GetItemResult {
     /// The RPC API version.
     pub api_version: Version,
     /// The stored value.
-    pub stored_value: StoredValue,
+    pub proofs: Vec<TrieMerkleProof>,
 }
 
 /// "state_get_item" RPC.
@@ -82,9 +82,9 @@ impl RpcWithParamsExt for GetItem {
                 )
                 .await;
 
-            // Extract the EE `StoredValue` from the result.
-            let ee_stored_value = match query_result {
-                Ok(QueryResult::Success(stored_value)) => stored_value,
+            // Extract the EE `Vec<TrieMerkleProof<Key, StoredValue>>` from the result.
+            let ee_proofs = match query_result {
+                Ok(QueryResult::Success(results)) => results,
                 Ok(query_result) => {
                     let error_msg = format!("state query failed: {:?}", query_result);
                     info!("{}", error_msg);
@@ -94,7 +94,7 @@ impl RpcWithParamsExt for GetItem {
                     ))?);
                 }
                 Err(error) => {
-                    let error_msg = format!("state query failed to execute: {}", error);
+                    let error_msg = format!("state query failed to execute: {:?}", error);
                     info!("{}", error_msg);
                     return Ok(response_builder.error(warp_json_rpc::Error::custom(
                         ErrorCode::QueryFailedToExecute as i64,
@@ -103,12 +103,15 @@ impl RpcWithParamsExt for GetItem {
                 }
             };
 
-            // Return the result.
-            match StoredValue::try_from(&ee_stored_value) {
-                Ok(stored_value) => {
+            match ee_proofs
+                .into_iter()
+                .map(TrieMerkleProof::try_from)
+                .collect::<Result<Vec<TrieMerkleProof>, _>>()
+            {
+                Ok(proofs) => {
                     let result = Self::ResponseResult {
                         api_version: CLIENT_API_VERSION.clone(),
-                        stored_value,
+                        proofs,
                     };
                     Ok(response_builder.success(result)?)
                 }

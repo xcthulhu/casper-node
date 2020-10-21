@@ -116,9 +116,19 @@ impl<K, V> TrieMerkleProof<K, V> {
         }
     }
 
+    /// Getter for the key in [`TrieMerkleProof`]
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+
     /// Getter for the value in [`TrieMerkleProof`]
     pub fn value(&self) -> &V {
         &self.value
+    }
+
+    /// TODO
+    pub fn into_value(self) -> V {
+        self.value
     }
 }
 

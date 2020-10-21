@@ -21,7 +21,10 @@ use crate::{
         stored_value::{gens::stored_value_arb, StoredValue},
         transform::Transform,
     },
-    storage::global_state::{in_memory::InMemoryGlobalState, StateProvider, StateReader},
+    storage::{
+        global_state::{in_memory::InMemoryGlobalState, StateProvider, StateReader},
+        trie::merkle_proof::TrieMerkleProof,
+    },
 };
 
 struct CountingDb {
@@ -59,6 +62,14 @@ impl StateReader<Key, StoredValue> for CountingDb {
         };
         self.count.set(count + 1);
         Ok(Some(value))
+    }
+
+    fn read_with_proof(
+        &self,
+        _correlation_id: CorrelationId,
+        _key: &Key,
+    ) -> Result<Option<TrieMerkleProof<Key, StoredValue>>, Self::Error> {
+        Ok(None)
     }
 }
 
@@ -295,8 +306,9 @@ proptest! {
         let view = gs.checkout(root_hash).unwrap().unwrap();
         let tc = TrackingCopy::new(view);
         let empty_path = Vec::new();
-        if let Ok(TrackingCopyQueryResult::Success(result)) = tc.query(correlation_id, k, &empty_path) {
-            assert_eq!(v, result);
+        if let Ok(TrackingCopyQueryResult::Success(results)) = tc.query(correlation_id, k, &empty_path) {
+            let result = results[0].value();
+            assert_eq!(&v, result);
         } else {
             panic!("Query failed when it should not have!");
         }
@@ -335,8 +347,9 @@ proptest! {
         let view = gs.checkout(root_hash).unwrap().unwrap();
         let tc = TrackingCopy::new(view);
         let path = vec!(name.clone());
-        if let Ok(TrackingCopyQueryResult::Success(result)) = tc.query(correlation_id, contract_key, &path) {
-            assert_eq!(v, result);
+        if let Ok(TrackingCopyQueryResult::Success(results)) = tc.query(correlation_id, contract_key, &path) {
+            let result = results[0].value();
+            assert_eq!(&v, result);
         } else {
             panic!("Query failed when it should not have!");
         }
@@ -377,8 +390,9 @@ proptest! {
         let view = gs.checkout(root_hash).unwrap().unwrap();
         let tc = TrackingCopy::new(view);
         let path = vec!(name.clone());
-        if let Ok(TrackingCopyQueryResult::Success(result)) = tc.query(correlation_id, account_key, &path) {
-            assert_eq!(v, result);
+        if let Ok(TrackingCopyQueryResult::Success(results)) = tc.query(correlation_id, account_key, &path) {
+            let result = results[0].value();
+            assert_eq!(&v, result);
         } else {
             panic!("Query failed when it should not have!");
         }
@@ -436,9 +450,10 @@ proptest! {
         let tc = TrackingCopy::new(view);
         let path = vec!(contract_name, state_name);
 
-        let result =  tc.query(correlation_id, account_key, &path);
-        if let Ok(TrackingCopyQueryResult::Success(result)) = result {
-            assert_eq!(v, result);
+        let results =  tc.query(correlation_id, account_key, &path);
+        if let Ok(TrackingCopyQueryResult::Success(results)) = results {
+            let result = results[0].value();
+            assert_eq!(&v, result);
         } else {
             panic!("Query failed when it should not have!");
         }
