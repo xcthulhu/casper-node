@@ -557,3 +557,85 @@ fn query_for_circular_references_should_fail() {
         panic!("Query didn't fail with a circular reference error");
     }
 }
+
+#[test]
+fn validate_query_proof_should_work() {
+    // create account
+    let account_hash = AccountHash::new([3; 32]);
+    let fake_purse = URef::new([4; 32], AccessRights::READ_ADD_WRITE);
+    let account_value = StoredValue::Account(Account::create(
+        account_hash,
+        NamedKeys::default(),
+        fake_purse,
+    ));
+    let account_key = Key::Account(account_hash);
+
+    // create contract that refers to that account
+    let account_name = "account".to_string();
+    let named_keys = {
+        let mut tmp = NamedKeys::new();
+        tmp.insert(account_name.clone(), account_key);
+        tmp
+    };
+    let contract_value = StoredValue::Contract(Contract::new(
+        [2; 32],
+        [3; 32],
+        named_keys,
+        EntryPoints::default(),
+        ProtocolVersion::V1_0_0,
+    ));
+    let contract_key = Key::Hash([5; 32]);
+
+    // create account that refers to that contract
+    let account_hash = AccountHash::new([7; 32]);
+    let fake_purse = URef::new([6; 32], AccessRights::READ_ADD_WRITE);
+    let contract_name = "contract".to_string();
+    let named_keys = {
+        let mut tmp = NamedKeys::new();
+        tmp.insert(contract_name.clone(), contract_key);
+        tmp
+    };
+    let main_account_value =
+        StoredValue::Account(Account::create(account_hash, named_keys, fake_purse));
+    let main_account_key = Key::Account(account_hash);
+
+    // persist them
+    let correlation_id = CorrelationId::new();
+    let (global_state, root_hash) = InMemoryGlobalState::from_pairs(
+        correlation_id,
+        &[
+            (account_key, account_value.to_owned()),
+            (contract_key, contract_value),
+            (main_account_key, main_account_value),
+        ],
+    )
+    .unwrap();
+
+    let view = global_state
+        .checkout(root_hash)
+        .expect("should checkout")
+        .expect("should have view");
+
+    let tracking_copy = TrackingCopy::new(view);
+
+    let path = &[contract_name, account_name];
+
+    let result = tracking_copy
+        .query(correlation_id, main_account_key, path)
+        .expect("should query");
+
+    let proofs = if let TrackingCopyQueryResult::Success { proofs, .. } = result {
+        proofs
+    } else {
+        panic!("query was not successful: {:?}", result)
+    };
+
+    assert!(crate::core::validate_query_proof(
+        &root_hash,
+        &proofs,
+        &main_account_key,
+        path,
+        &account_value
+    )
+    .expect("should validate"))
+}

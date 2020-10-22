@@ -7,6 +7,8 @@ pub mod runtime;
 pub mod runtime_context;
 pub(crate) mod tracking_copy;
 
+pub use tracking_copy::validate_query_proof;
+
 pub const ADDRESS_LENGTH: usize = 32;
 pub const DEPLOY_HASH_LENGTH: usize = 32;
 

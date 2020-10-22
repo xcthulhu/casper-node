@@ -44,6 +44,7 @@ use casper_execution_engine::{
         global_state::{in_memory::InMemoryGlobalState, lmdb::LmdbGlobalState, StateProvider},
         protocol_data_store::lmdb::LmdbProtocolDataStore,
         transaction_source::lmdb::LmdbEnvironment,
+        trie::merkle_proof::TrieMerkleProof,
         trie_store::lmdb::LmdbTrieStore,
     },
 };
@@ -56,7 +57,6 @@ use casper_types::{
 };
 
 use crate::internal::{utils, DEFAULT_PROTOCOL_VERSION};
-use casper_execution_engine::storage::trie::merkle_proof::TrieMerkleProof;
 
 /// LMDB initial map size is calculated based on DEFAULT_LMDB_PAGES and systems page size.
 ///
@@ -384,13 +384,42 @@ where
             return Err(query_response.take_failure());
         }
 
-        let mut merkle_proofs: Vec<TrieMerkleProof<Key, StoredValue>> =
+        let (value, _proofs): (StoredValue, Vec<TrieMerkleProof<Key, StoredValue>>) =
             bytesrepr::deserialize(query_response.take_success())
                 .map_err(|err| format!("{:?}", err))?;
 
-        let proof = merkle_proofs.pop().expect("should have at least one proof");
+        Ok(value)
+    }
 
-        Ok(proof.into_value())
+    pub fn query_with_proof(
+        &self,
+        maybe_post_state: Option<Vec<u8>>,
+        base_key: Key,
+        path: &[String],
+    ) -> Result<(StoredValue, Vec<TrieMerkleProof<Key, StoredValue>>), String> {
+        let post_state = maybe_post_state
+            .or_else(|| self.post_state_hash.clone())
+            .expect("builder must have a post-state hash");
+
+        let path_vec: Vec<String> = path.to_vec();
+
+        let query_request = create_query_request(post_state, base_key, path_vec);
+
+        let mut query_response = self
+            .engine_state
+            .query(RequestOptions::new(), query_request)
+            .wait_drop_metadata()
+            .expect("should get query response");
+
+        if query_response.has_failure() {
+            return Err(query_response.take_failure());
+        }
+
+        let (value, proofs): (StoredValue, Vec<TrieMerkleProof<Key, StoredValue>>) =
+            bytesrepr::deserialize(query_response.take_success())
+                .map_err(|err| format!("{:?}", err))?;
+
+        Ok((value, proofs))
     }
 
     pub fn total_supply(&self, maybe_post_state: Option<Vec<u8>>) -> U512 {
