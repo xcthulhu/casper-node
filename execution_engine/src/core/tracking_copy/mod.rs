@@ -20,7 +20,7 @@ use crate::{
     core::engine_state::{execution_effect::ExecutionEffect, op::Op},
     shared::{
         additive_map::AdditiveMap,
-        newtypes::CorrelationId,
+        newtypes::{Blake2bHash, CorrelationId},
         stored_value::StoredValue,
         transform::{self, Transform},
         TypeMismatch,
@@ -36,6 +36,52 @@ pub enum TrackingCopyQueryResult {
     },
     ValueNotFound(String),
     CircularReference(String),
+}
+
+pub fn validate_proofs(
+    hash: &Blake2bHash,
+    proofs: &Vec<TrieMerkleProof<Key, StoredValue>>,
+    key: &Key,
+    path: &Vec<String>,
+    value: &StoredValue,
+) -> Result<bool, bytesrepr::Error> {
+    if proofs.len() != path.len() + 1 {
+        return Ok(false);
+    }
+
+    let mut proofs_iter = proofs.iter();
+    let first_proof = match proofs_iter.next() {
+        None => return Ok(false),
+        Some(proof) => proof,
+    };
+    if first_proof.key() != key {
+        return Ok(false);
+    }
+
+    let mut proof_value = first_proof.value();
+
+    for (proof, path_component) in proofs_iter.zip(path.iter()) {
+        let named_keys = match proof_value {
+            StoredValue::Account(account) => account.named_keys(),
+            StoredValue::Contract(contract) => contract.named_keys(),
+            _ => return Ok(false),
+        };
+
+        let key = match named_keys.get(path_component) {
+            None => return Ok(false),
+            Some(key) => key,
+        };
+
+        if key != proof.key() {
+            return Ok(false);
+        }
+
+        if hash != &proof.compute_state_hash()? {
+            return Ok(false);
+        }
+        proof_value = proof.value();
+    }
+    Ok(proof_value == value)
 }
 
 /// Struct containing state relating to a given query.

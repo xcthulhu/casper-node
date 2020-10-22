@@ -47,6 +47,18 @@ pub struct RpcCall {
     verbose: bool,
 }
 
+// TODO: Make me real
+// pub fn check_response(state_root_hash: Digest, key: Key, response: JsonRpc) -> Result<()> {
+//     let hex_encoded_proofs: &str = response.get_result()?.get("proof")?.as_str()?;
+//     let proofs: Vec<TrieMerkleProof<Key, StoredValue>> =
+//         bytesrepr::deserialize(hex::decode(hex_encoded_proofs)?)?;
+//     let value = response.get_result()?;
+//     if !validate_proofs(&state_root_hash, &proofs, &key, &value)? {
+//         panic!("uh oh")
+//     }
+//     Ok(())
+// }
+
 /// `RpcCall` encapsulates calls made to the casper node service via JSON-RPC.
 impl RpcCall {
     /// Creates a new RPC instance.
