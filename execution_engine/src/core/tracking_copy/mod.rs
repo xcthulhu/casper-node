@@ -11,6 +11,7 @@ use std::{
 };
 
 use linked_hash_map::LinkedHashMap;
+use thiserror::Error;
 
 use casper_types::{bytesrepr, CLType, CLValueError, Key};
 
@@ -454,7 +455,33 @@ impl<R: StateReader<Key, StoredValue>> StateReader<Key, StoredValue> for &Tracki
     }
 }
 
-/// TODO
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum ValidationError {
+    #[error("The path should not have a different length than the proof less one.")]
+    PathLengthDifferentThanProofLessOne,
+
+    #[error("The provided key does not match the key in the proof.")]
+    UnexpectedKey,
+
+    #[error("The provided value does not match the value in the proof.")]
+    UnexpectedValue,
+
+    #[error("The proof hash is invalid.")]
+    InvalidProofHash,
+
+    #[error("The path went cold.")]
+    PathCold,
+
+    #[error("Serialization error: {0}")]
+    BytesRepr(bytesrepr::Error),
+}
+
+impl From<bytesrepr::Error> for ValidationError {
+    fn from(error: bytesrepr::Error) -> Self {
+        Self::BytesRepr(error)
+    }
+}
+
 #[allow(unused)]
 pub fn validate_query_proof(
     hash: &Blake2bHash,
@@ -462,43 +489,52 @@ pub fn validate_query_proof(
     key: &Key,
     path: &[String],
     value: &StoredValue,
-) -> Result<bool, bytesrepr::Error> {
+) -> Result<(), ValidationError> {
     if proofs.len() != path.len() + 1 {
-        return Ok(false);
+        return Err(ValidationError::PathLengthDifferentThanProofLessOne);
     }
 
     let mut proofs_iter = proofs.iter();
-    let first_proof = match proofs_iter.next() {
-        None => return Ok(false),
-        Some(proof) => proof,
-    };
+
+    // length check above means we are safe to unwrap here
+    let first_proof = proofs_iter.next().unwrap();
+
     if first_proof.key() != key {
-        return Ok(false);
+        return Err(ValidationError::UnexpectedKey);
     }
+
+    if hash != &first_proof.compute_state_hash()? {
+        return Err(ValidationError::InvalidProofHash);
+    }
+
     let mut proof_value = first_proof.value();
 
     for (proof, path_component) in proofs_iter.zip(path.iter()) {
         let named_keys = match proof_value {
             StoredValue::Account(account) => account.named_keys(),
             StoredValue::Contract(contract) => contract.named_keys(),
-            _ => return Ok(false),
+            _ => return Err(ValidationError::PathCold),
         };
 
         let key = match named_keys.get(path_component) {
-            None => return Ok(false),
             Some(key) => key,
+            None => return Err(ValidationError::PathCold),
         };
 
         if proof.key() != key {
-            return Ok(false);
+            return Err(ValidationError::UnexpectedKey);
         }
 
         if hash != &proof.compute_state_hash()? {
-            return Ok(false);
+            return Err(ValidationError::InvalidProofHash);
         }
 
         proof_value = proof.value();
     }
 
-    Ok(proof_value == value)
+    if proof_value != value {
+        return Err(ValidationError::UnexpectedValue);
+    }
+
+    Ok(())
 }

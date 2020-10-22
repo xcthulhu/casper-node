@@ -14,10 +14,10 @@ use super::{
     meter::count_meter::Count, AddResult, TrackingCopy, TrackingCopyCache, TrackingCopyQueryResult,
 };
 use crate::{
-    core::engine_state::op::Op,
+    core::{engine_state::op::Op, ValidationError},
     shared::{
         account::{Account, AssociatedKeys},
-        newtypes::CorrelationId,
+        newtypes::{Blake2bHash, CorrelationId},
         stored_value::{gens::stored_value_arb, StoredValue},
         transform::Transform,
     },
@@ -605,8 +605,8 @@ fn validate_query_proof_should_work() {
         correlation_id,
         &[
             (account_key, account_value.to_owned()),
-            (contract_key, contract_value),
-            (main_account_key, main_account_value),
+            (contract_key, contract_value.to_owned()),
+            (main_account_key, main_account_value.to_owned()),
         ],
     )
     .unwrap();
@@ -630,12 +630,64 @@ fn validate_query_proof_should_work() {
         panic!("query was not successful: {:?}", result)
     };
 
-    assert!(crate::core::validate_query_proof(
-        &root_hash,
-        &proofs,
-        &main_account_key,
-        path,
-        &account_value
+    // Happy path
+    crate::core::validate_query_proof(&root_hash, &proofs, &main_account_key, path, &account_value)
+        .expect("should validate");
+
+    // Path should be the same length as the proofs less one (so it should be of length 2)
+    assert_eq!(
+        crate::core::validate_query_proof(
+            &root_hash,
+            &proofs,
+            &main_account_key,
+            &[],
+            &account_value
+        ),
+        Err(ValidationError::PathLengthDifferentThanProofLessOne)
+    );
+
+    // Find an unexpected value after tracing the proof
+    assert_eq!(
+        crate::core::validate_query_proof(
+            &root_hash,
+            &proofs,
+            &main_account_key,
+            path,
+            &main_account_value
+        ),
+        Err(ValidationError::UnexpectedValue)
+    );
+
+    // Wrong key provided for the first entry in the proof
+    assert_eq!(
+        crate::core::validate_query_proof(&root_hash, &proofs, &account_key, path, &account_value),
+        Err(ValidationError::UnexpectedKey)
+    );
+
+    // Bad proof hash
+    assert_eq!(
+        crate::core::validate_query_proof(
+            &Blake2bHash::new(&[]),
+            &proofs,
+            &main_account_key,
+            path,
+            &account_value
+        ),
+        Err(ValidationError::InvalidProofHash)
+    );
+
+    // Provided path contains an unexpected key
+    assert_eq!(
+        crate::core::validate_query_proof(
+            &root_hash,
+            &proofs,
+            &main_account_key,
+            &[
+                "a non-existent path key 1".to_string(),
+                "a non-existent path key 2".to_string()
+            ],
+            &account_value
+        ),
+        Err(ValidationError::PathCold)
     )
-    .expect("should validate"))
 }
