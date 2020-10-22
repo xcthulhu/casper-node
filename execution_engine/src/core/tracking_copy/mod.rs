@@ -30,7 +30,10 @@ use crate::{
 
 #[derive(Debug)]
 pub enum TrackingCopyQueryResult {
-    Success(Vec<TrieMerkleProof<Key, StoredValue>>),
+    Success {
+        value: StoredValue,
+        proofs: Vec<TrieMerkleProof<Key, StoredValue>>,
+    },
     ValueNotFound(String),
     CircularReference(String),
 }
@@ -361,10 +364,12 @@ impl<R: StateReader<Key, StoredValue>> TrackingCopy<R> {
                 Some(stored_value) => stored_value,
             };
 
+            let value = stored_value.value().to_owned();
+
             proofs.push(stored_value);
 
             if query.unvisited_names.is_empty() {
-                return Ok(TrackingCopyQueryResult::Success(proofs));
+                return Ok(TrackingCopyQueryResult::Success { value, proofs });
             }
 
             let stored_value: &StoredValue = proofs

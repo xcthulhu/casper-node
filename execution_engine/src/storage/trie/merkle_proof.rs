@@ -126,6 +126,11 @@ impl<K, V> TrieMerkleProof<K, V> {
         &self.value
     }
 
+    /// Getter for the proof steps in [`TrieMerkleProof`]
+    pub fn proof_steps(&self) -> &VecDeque<TrieMerkleProofStep> {
+        &self.proof_steps
+    }
+
     /// TODO
     pub fn into_value(self) -> V {
         self.value
@@ -134,8 +139,8 @@ impl<K, V> TrieMerkleProof<K, V> {
 
 impl<K, V> TrieMerkleProof<K, V>
 where
-    K: ToBytes + Copy,
-    V: ToBytes + Copy,
+    K: ToBytes + Copy + Clone,
+    V: ToBytes + Clone,
 {
     /// Recomputes a state root hash from a [`TrieMerkleProof`].
     /// This is done in the following steps:
@@ -151,7 +156,7 @@ where
     /// The steps in this function reflect `operations::rehash`.
     pub fn compute_state_hash(&self) -> Result<Blake2bHash, bytesrepr::Error> {
         let mut hash = {
-            let leaf_bytes = Trie::leaf(self.key, self.value).to_bytes()?;
+            let leaf_bytes = Trie::leaf(self.key, self.value.to_owned()).to_bytes()?;
             Blake2bHash::new(&leaf_bytes)
         };
 

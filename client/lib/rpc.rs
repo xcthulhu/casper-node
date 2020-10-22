@@ -4,7 +4,10 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use casper_execution_engine::core::engine_state::ExecutableDeployItem;
+use casper_execution_engine::{
+    core::engine_state::ExecutableDeployItem, shared::stored_value::StoredValue,
+    storage::trie::merkle_proof::TrieMerkleProof,
+};
 use casper_node::{
     crypto::{asymmetric_key::PublicKey, hash::Digest},
     rpcs::{
@@ -16,7 +19,10 @@ use casper_node::{
     },
     types::{BlockHash, Deploy, DeployHash},
 };
-use casper_types::{bytesrepr::ToBytes, Key, RuntimeArgs, URef, U512};
+use casper_types::{
+    bytesrepr::{self, ToBytes},
+    Key, RuntimeArgs, URef, U512,
+};
 
 use crate::{
     deploy::{DeployExt, DeployParams, ListDeploys, SendDeploy, Transfer},
@@ -78,7 +84,23 @@ impl RpcCall {
             key: key.to_formatted_string(),
             path,
         };
-        GetItem::request_with_map_params(self, params)
+        let response: JsonRpc = GetItem::request_with_map_params(self, params)?;
+
+        let value = response.get_result().expect("should have result");
+        let object = value.as_object().expect("should be an object");
+        let proof = object.get("proof").expect("should have proof");
+        let proof_str = proof.as_str().expect("should cast to a str");
+        let proof_bytes = hex::decode(proof_str).expect("should decode proof");
+        let proofs: Vec<TrieMerkleProof<Key, StoredValue>> =
+            bytesrepr::deserialize(proof_bytes).expect("proof_bytes should deserialize");
+        assert!(
+            proofs.iter().all(|proof| {
+                proof.compute_state_hash().expect("should compute") == state_root_hash.into()
+            }),
+            "merkle proof validation failed"
+        );
+
+        Ok(response)
     }
 
     /// Queries the node for the most recent state root hash or as of a given block hash if

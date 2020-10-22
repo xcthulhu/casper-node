@@ -16,8 +16,9 @@ use casper_types::{Key, URef, U512};
 use super::{ApiRequest, Error, ErrorCode, ReactorEventT, RpcWithParams, RpcWithParamsExt};
 use crate::{
     components::api_server::CLIENT_API_VERSION, crypto::hash::Digest, effect::EffectBuilder,
-    reactor::QueueKind, types::json_compatibility::TrieMerkleProof,
+    reactor::QueueKind, types::json_compatibility::StoredValue,
 };
+use casper_types::bytesrepr::ToBytes;
 
 /// Params for "state_get_item" RPC request.
 #[derive(Serialize, Deserialize, Debug)]
@@ -36,7 +37,9 @@ pub struct GetItemResult {
     /// The RPC API version.
     pub api_version: Version,
     /// The stored value.
-    pub proofs: Vec<TrieMerkleProof>,
+    pub stored_value: StoredValue,
+    /// The proof.
+    pub proof: String,
 }
 
 /// "state_get_item" RPC.
@@ -83,8 +86,8 @@ impl RpcWithParamsExt for GetItem {
                 .await;
 
             // Extract the EE `Vec<TrieMerkleProof<Key, StoredValue>>` from the result.
-            let ee_proofs = match query_result {
-                Ok(QueryResult::Success(results)) => results,
+            let (value, proofs) = match query_result {
+                Ok(QueryResult::Success { value, proofs }) => (value, proofs),
                 Ok(query_result) => {
                     let error_msg = format!("state query failed: {:?}", query_result);
                     info!("{}", error_msg);
@@ -103,23 +106,29 @@ impl RpcWithParamsExt for GetItem {
                 }
             };
 
-            match ee_proofs
-                .into_iter()
-                .map(TrieMerkleProof::try_from)
-                .collect::<Result<Vec<TrieMerkleProof>, _>>()
-            {
-                Ok(proofs) => {
-                    let result = Self::ResponseResult {
-                        api_version: CLIENT_API_VERSION.clone(),
-                        proofs,
-                    };
-                    Ok(response_builder.success(result)?)
-                }
+            let value_compat = match StoredValue::try_from(&value) {
+                Ok(value_compat) => value_compat,
                 Err(error) => {
                     info!("failed to encode stored value: {}", error);
                     return Ok(response_builder.error(warp_json_rpc::Error::INTERNAL_ERROR)?);
                 }
-            }
+            };
+
+            let proofs_bytes = match proofs.to_bytes() {
+                Ok(proofs_bytes) => proofs_bytes,
+                Err(error) => {
+                    info!("failed to encode stored value: {}", error);
+                    return Ok(response_builder.error(warp_json_rpc::Error::INTERNAL_ERROR)?);
+                }
+            };
+
+            let result = Self::ResponseResult {
+                api_version: CLIENT_API_VERSION.clone(),
+                stored_value: value_compat,
+                proof: hex::encode(proofs_bytes),
+            };
+
+            Ok(response_builder.success(result)?)
         }
         .boxed()
     }

@@ -11,7 +11,10 @@ pub enum QueryResult {
     RootNotFound,
     ValueNotFound(String),
     CircularReference(String),
-    Success(Vec<TrieMerkleProof<Key, StoredValue>>),
+    Success {
+        value: StoredValue,
+        proofs: Vec<TrieMerkleProof<Key, StoredValue>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +53,9 @@ impl From<TrackingCopyQueryResult> for QueryResult {
             TrackingCopyQueryResult::CircularReference(message) => {
                 QueryResult::CircularReference(message)
             }
-            TrackingCopyQueryResult::Success(value) => QueryResult::Success(value),
+            TrackingCopyQueryResult::Success { value, proofs } => {
+                QueryResult::Success { value, proofs }
+            }
         }
     }
 }

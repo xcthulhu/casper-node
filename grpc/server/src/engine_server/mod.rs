@@ -92,7 +92,7 @@ where
         let result = self.run_query(correlation_id, request);
 
         let response = match result {
-            Ok(QueryResult::Success(value)) => {
+            Ok(QueryResult::Success { value, .. }) => {
                 let mut result = ipc::QueryResponse::new();
                 match value.to_bytes() {
                     Ok(serialized_value) => {
@@ -100,7 +100,8 @@ where
                         result.set_success(serialized_value);
                     }
                     Err(error_msg) => {
-                        let log_message = format!("Failed to serialize StoredValue: {}", error_msg);
+                        let log_message =
+                            format!("Failed to serialize StoredValue: {:?}", error_msg);
                         warn!("{}", log_message);
                         result.set_failure(log_message);
                     }
