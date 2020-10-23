@@ -204,7 +204,7 @@ impl RpcWithParamsExt for GetBalance {
                 .await;
 
             let balance_value = match balance_result {
-                Ok(BalanceResult::Success(value)) => value,
+                Ok(BalanceResult::Success { motes, .. }) => motes, // TODO
                 Ok(balance_result) => {
                     let error_msg = format!("get-balance failed: {:?}", balance_result);
                     info!("{}", error_msg);

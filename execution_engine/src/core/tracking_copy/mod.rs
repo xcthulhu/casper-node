@@ -488,7 +488,6 @@ impl From<bytesrepr::Error> for ValidationError {
     }
 }
 
-#[allow(unused)]
 pub fn validate_query_proof(
     hash: &Blake2bHash,
     proofs: &[TrieMerkleProof<Key, StoredValue>],
