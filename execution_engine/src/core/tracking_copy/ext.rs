@@ -33,21 +33,21 @@ pub trait TrackingCopyExt<R> {
 
     /// Reads the account at a given account address
     fn read_account(
-        &self,
+        &mut self,
         correlation_id: CorrelationId,
         account_hash: AccountHash,
     ) -> Result<Account, Self::Error>;
 
     /// Gets the purse balance key for a given purse id
     fn get_purse_balance_key(
-        &self,
+        &mut self,
         correlation_id: CorrelationId,
         purse_key: Key,
     ) -> Result<Key, Self::Error>;
 
     /// Gets the balance at a given balance key
     fn get_purse_balance(
-        &self,
+        &mut self,
         correlation_id: CorrelationId,
         balance_key: Key,
     ) -> Result<Motes, Self::Error>;
@@ -120,7 +120,7 @@ where
     }
 
     fn read_account(
-        &self,
+        &mut self,
         correlation_id: CorrelationId,
         account_hash: AccountHash,
     ) -> Result<Account, Self::Error> {
@@ -139,7 +139,7 @@ where
     }
 
     fn get_purse_balance_key(
-        &self,
+        &mut self,
         correlation_id: CorrelationId,
         purse_key: Key,
     ) -> Result<Key, Self::Error> {
@@ -158,7 +158,7 @@ where
     }
 
     fn get_purse_balance(
-        &self,
+        &mut self,
         correlation_id: CorrelationId,
         key: Key,
     ) -> Result<Motes, Self::Error> {

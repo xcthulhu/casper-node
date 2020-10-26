@@ -1439,7 +1439,7 @@ where
         // Get account main purse balance to enforce precondition and in case of forced
         // transfer validation_spec_5: account main purse minimum balance
         let account_main_purse_balance: Motes = match tracking_copy
-            .borrow()
+            .borrow_mut()
             .get_purse_balance(correlation_id, account_main_purse_balance_key)
         {
             Ok(balance) => balance,
