@@ -96,15 +96,6 @@ pub trait TrackingCopyExt<R> {
     ) -> Result<Module, Self::Error>;
 }
 
-// Converts a purse_key
-fn hash_purse_key(purse_key: Key) -> Result<Key, execution::Error> {
-    let uref = purse_key
-        .as_uref()
-        .ok_or_else(|| execution::Error::KeyIsNotAURef { key: purse_key })?;
-    let local_key_bytes = uref.addr();
-    Ok(Key::Hash(local_key_bytes))
-}
-
 impl<R> TrackingCopyExt<R> for TrackingCopy<R>
 where
     R: StateReader<Key, StoredValue>,
@@ -152,8 +143,11 @@ where
         correlation_id: CorrelationId,
         purse_key: Key,
     ) -> Result<Key, execution::Error> {
+        let balance_key = purse_key
+            .uref_to_hash()
+            .ok_or_else(|| execution::Error::KeyIsNotAURef { key: purse_key })?;
         let stored_value: StoredValue = match self
-            .read(correlation_id, &hash_purse_key(purse_key)?)
+            .read(correlation_id, &balance_key)
             .map_err(Into::into)?
         {
             Some(stored_value) => stored_value,
@@ -186,17 +180,15 @@ where
         correlation_id: CorrelationId,
         purse_key: Key,
     ) -> Result<(Key, TrieMerkleProof<Key, StoredValue>), execution::Error> {
-        let uref = purse_key
-            .as_uref()
+        let balance_key = purse_key
+            .uref_to_hash()
             .ok_or_else(|| execution::Error::KeyIsNotAURef { key: purse_key })?;
-        let local_key_bytes = uref.addr();
-        let balance_mapping_key = Key::Hash(local_key_bytes);
         let proof = match self
-            .read_with_proof(correlation_id, &balance_mapping_key)
+            .read_with_proof(correlation_id, &balance_key)
             .map_err(Into::into)?
         {
             Some(proof) => proof,
-            None => return Err(execution::Error::URefNotFound(uref.to_owned())),
+            None => return Err(execution::Error::KeyNotFound(purse_key.to_owned())),
         };
         let stored_value_ref: &StoredValue = proof.value();
         let cl_value: CLValue = stored_value_ref

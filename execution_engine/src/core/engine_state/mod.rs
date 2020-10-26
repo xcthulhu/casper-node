@@ -1046,10 +1046,10 @@ where
             Some(tracking_copy) => tracking_copy,
             None => return Ok(BalanceResult::RootNotFound),
         };
-        let (balance_key, main_purse_proof) =
+        let (purse_balance_key, main_purse_proof) =
             tracking_copy.get_purse_balance_key_with_proof(correlation_id, purse_uref.into())?;
         let (balance, balance_proof) =
-            tracking_copy.get_purse_balance_with_proof(correlation_id, balance_key)?;
+            tracking_copy.get_purse_balance_with_proof(correlation_id, purse_balance_key)?;
         let motes = balance.value();
         Ok(BalanceResult::Success {
             motes,
