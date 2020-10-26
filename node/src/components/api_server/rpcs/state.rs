@@ -229,7 +229,7 @@ impl RpcWithParamsExt for GetBalance {
                 }
             };
 
-            let proof_bytes = match (main_purse_proof, balance_proof).to_bytes() {
+            let proof_bytes = match (*main_purse_proof, *balance_proof).to_bytes() {
                 Ok(proof_bytes) => proof_bytes,
                 Err(error) => {
                     info!("failed to encode stored value: {}", error);

@@ -10,8 +10,8 @@ pub enum BalanceResult {
     RootNotFound,
     Success {
         motes: U512,
-        main_purse_proof: TrieMerkleProof<Key, StoredValue>,
-        balance_proof: TrieMerkleProof<Key, StoredValue>,
+        main_purse_proof: Box<TrieMerkleProof<Key, StoredValue>>,
+        balance_proof: Box<TrieMerkleProof<Key, StoredValue>>,
     },
 }
 

@@ -559,6 +559,7 @@ pub fn validate_query_proof(
     Ok(())
 }
 
+#[allow(unused)]
 pub fn validate_balance_proof(
     hash: &Blake2bHash,
     main_purse_proof: &TrieMerkleProof<Key, StoredValue>,
