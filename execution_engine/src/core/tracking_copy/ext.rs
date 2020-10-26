@@ -111,11 +111,11 @@ where
         let account_key = Key::Account(account_hash);
         match self.get(correlation_id, &account_key).map_err(Into::into)? {
             Some(StoredValue::Account(account)) => Ok(account),
-            Some(other) => Err(execution::Error::TypeMismatch(TypeMismatch::new(
+            Some(other) => Err(Self::Error::TypeMismatch(TypeMismatch::new(
                 "Account".to_string(),
                 other.type_name(),
             ))),
-            None => Err(execution::Error::KeyNotFound(account_key)),
+            None => Err(Self::Error::KeyNotFound(account_key)),
         }
     }
 
@@ -123,18 +123,18 @@ where
         &self,
         correlation_id: CorrelationId,
         account_hash: AccountHash,
-    ) -> Result<Account, execution::Error> {
+    ) -> Result<Account, Self::Error> {
         let account_key = Key::Account(account_hash);
         match self
             .read(correlation_id, &account_key)
             .map_err(Into::into)?
         {
             Some(StoredValue::Account(account)) => Ok(account),
-            Some(other) => Err(execution::Error::TypeMismatch(TypeMismatch::new(
+            Some(other) => Err(Self::Error::TypeMismatch(TypeMismatch::new(
                 "Account".to_string(),
                 other.type_name(),
             ))),
-            None => Err(execution::Error::KeyNotFound(account_key)),
+            None => Err(Self::Error::KeyNotFound(account_key)),
         }
     }
 
@@ -142,20 +142,18 @@ where
         &self,
         correlation_id: CorrelationId,
         purse_key: Key,
-    ) -> Result<Key, execution::Error> {
+    ) -> Result<Key, Self::Error> {
         let balance_key = purse_key
             .uref_to_hash()
-            .ok_or_else(|| execution::Error::KeyIsNotAURef { key: purse_key })?;
+            .ok_or_else(|| Self::Error::KeyIsNotAURef { key: purse_key })?;
         let stored_value: StoredValue = match self
             .read(correlation_id, &balance_key)
             .map_err(Into::into)?
         {
             Some(stored_value) => stored_value,
-            None => return Err(execution::Error::KeyNotFound(purse_key)),
+            None => return Err(Self::Error::KeyNotFound(purse_key)),
         };
-        let cl_value: CLValue = stored_value
-            .try_into()
-            .map_err(execution::Error::TypeMismatch)?;
+        let cl_value: CLValue = stored_value.try_into().map_err(Self::Error::TypeMismatch)?;
         Ok(cl_value.into_t()?)
     }
 
@@ -163,14 +161,12 @@ where
         &self,
         correlation_id: CorrelationId,
         key: Key,
-    ) -> Result<Motes, execution::Error> {
+    ) -> Result<Motes, Self::Error> {
         let stored_value = match self.read(correlation_id, &key).map_err(Into::into)? {
             Some(stored_value) => stored_value,
-            None => return Err(execution::Error::KeyNotFound(key)),
+            None => return Err(Self::Error::KeyNotFound(key)),
         };
-        let cl_value: CLValue = stored_value
-            .try_into()
-            .map_err(execution::Error::TypeMismatch)?;
+        let cl_value: CLValue = stored_value.try_into().map_err(Self::Error::TypeMismatch)?;
         let balance = Motes::new(cl_value.into_t()?);
         Ok(balance)
     }
@@ -179,22 +175,22 @@ where
         &self,
         correlation_id: CorrelationId,
         purse_key: Key,
-    ) -> Result<(Key, TrieMerkleProof<Key, StoredValue>), execution::Error> {
+    ) -> Result<(Key, TrieMerkleProof<Key, StoredValue>), Self::Error> {
         let balance_key = purse_key
             .uref_to_hash()
-            .ok_or_else(|| execution::Error::KeyIsNotAURef { key: purse_key })?;
+            .ok_or_else(|| Self::Error::KeyIsNotAURef { key: purse_key })?;
         let proof = match self
             .read_with_proof(correlation_id, &balance_key)
             .map_err(Into::into)?
         {
             Some(proof) => proof,
-            None => return Err(execution::Error::KeyNotFound(purse_key.to_owned())),
+            None => return Err(Self::Error::KeyNotFound(purse_key.to_owned())),
         };
         let stored_value_ref: &StoredValue = proof.value();
         let cl_value: CLValue = stored_value_ref
             .clone()
             .try_into()
-            .map_err(execution::Error::TypeMismatch)?;
+            .map_err(Self::Error::TypeMismatch)?;
         Ok((cl_value.into_t()?, proof))
     }
 
@@ -202,19 +198,19 @@ where
         &self,
         correlation_id: CorrelationId,
         key: Key,
-    ) -> Result<(Motes, TrieMerkleProof<Key, StoredValue>), execution::Error> {
+    ) -> Result<(Motes, TrieMerkleProof<Key, StoredValue>), Self::Error> {
         let proof = match self
             .read_with_proof(correlation_id, &key)
             .map_err(Into::into)?
         {
             Some(proof) => proof,
-            None => return Err(execution::Error::KeyNotFound(key)),
+            None => return Err(Self::Error::KeyNotFound(key)),
         };
         let cl_value: CLValue = proof
             .value()
             .clone()
             .try_into()
-            .map_err(execution::Error::TypeMismatch)?;
+            .map_err(Self::Error::TypeMismatch)?;
         let balance = Motes::new(cl_value.into_t()?);
         Ok((balance, proof))
     }
@@ -228,11 +224,11 @@ where
         let key = contract_wasm_hash.into();
         match self.get(correlation_id, &key).map_err(Into::into)? {
             Some(StoredValue::ContractWasm(contract_wasm)) => Ok(contract_wasm),
-            Some(other) => Err(execution::Error::TypeMismatch(TypeMismatch::new(
+            Some(other) => Err(Self::Error::TypeMismatch(TypeMismatch::new(
                 "ContractHeader".to_string(),
                 other.type_name(),
             ))),
-            None => Err(execution::Error::KeyNotFound(key)),
+            None => Err(Self::Error::KeyNotFound(key)),
         }
     }
 
@@ -245,11 +241,11 @@ where
         let key = contract_hash.into();
         match self.get(correlation_id, &key).map_err(Into::into)? {
             Some(StoredValue::Contract(contract)) => Ok(contract),
-            Some(other) => Err(execution::Error::TypeMismatch(TypeMismatch::new(
+            Some(other) => Err(Self::Error::TypeMismatch(TypeMismatch::new(
                 "ContractHeader".to_string(),
                 other.type_name(),
             ))),
-            None => Err(execution::Error::KeyNotFound(key)),
+            None => Err(Self::Error::KeyNotFound(key)),
         }
     }
 
@@ -261,11 +257,11 @@ where
         let key = contract_package_hash.into();
         match self.get(correlation_id, &key).map_err(Into::into)? {
             Some(StoredValue::ContractPackage(contract_package)) => Ok(contract_package),
-            Some(other) => Err(execution::Error::TypeMismatch(TypeMismatch::new(
+            Some(other) => Err(Self::Error::TypeMismatch(TypeMismatch::new(
                 "ContractPackage".to_string(),
                 other.type_name(),
             ))),
-            None => Err(execution::Error::KeyNotFound(key)),
+            None => Err(Self::Error::KeyNotFound(key)),
         }
     }
 
