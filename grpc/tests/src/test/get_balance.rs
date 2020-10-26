@@ -6,8 +6,10 @@ use casper_engine_test_support::{
     internal::{ExecuteRequestBuilder, InMemoryWasmTestBuilder, DEFAULT_RUN_GENESIS_REQUEST},
     DEFAULT_ACCOUNT_ADDR,
 };
-use casper_execution_engine::{core, shared::newtypes::Blake2bHash};
-use casper_types::{account::AccountHash, runtime_args, PublicKey, RuntimeArgs, U512};
+use casper_execution_engine::{core, core::ValidationError, shared::newtypes::Blake2bHash};
+use casper_types::{
+    account::AccountHash, runtime_args, AccessRights, Key, PublicKey, RuntimeArgs, URef, U512,
+};
 
 const TRANSFER_ARG_TARGET: &str = "target";
 const TRANSFER_ARG_AMOUNT: &str = "amount";
@@ -73,5 +75,106 @@ fn get_balance_should_work() {
         alice_main_purse.into(),
         &alice_balance,
     )
-    .is_ok())
+    .is_ok());
+
+    let bogus_key = Key::Hash([1u8; 32]);
+    assert_eq!(
+        core::validate_balance_proof(
+            &state_root_hash,
+            &main_purse_proof,
+            &balance_proof,
+            bogus_key.to_owned(),
+            &alice_balance,
+        ),
+        Err(ValidationError::KeyIsNotAUref(bogus_key))
+    );
+
+    let bogus_uref: Key = Key::URef(URef::new([3u8; 32], AccessRights::READ_ADD_WRITE));
+    assert_eq!(
+        core::validate_balance_proof(
+            &state_root_hash,
+            &main_purse_proof,
+            &balance_proof,
+            bogus_uref,
+            &alice_balance,
+        ),
+        Err(ValidationError::UnexpectedKey)
+    );
+
+    let bogus_hash = Blake2bHash::new(&[5u8; 32]);
+    assert_eq!(
+        core::validate_balance_proof(
+            &bogus_hash,
+            &main_purse_proof,
+            &balance_proof,
+            alice_main_purse.into(),
+            &alice_balance,
+        ),
+        Err(ValidationError::InvalidProofHash)
+    );
+
+    assert_eq!(
+        core::validate_balance_proof(
+            &state_root_hash,
+            &main_purse_proof,
+            &main_purse_proof,
+            alice_main_purse.into(),
+            &alice_balance,
+        ),
+        Err(ValidationError::UnexpectedKey)
+    );
+
+    let bogus_motes = U512::from(1337);
+    assert_eq!(
+        core::validate_balance_proof(
+            &state_root_hash,
+            &main_purse_proof,
+            &balance_proof,
+            alice_main_purse.into(),
+            &bogus_motes,
+        ),
+        Err(ValidationError::UnexpectedValue)
+    );
+
+    ////////////////////////////////////////////
+
+    let transfer_request = ExecuteRequestBuilder::transfer(
+        *DEFAULT_ACCOUNT_ADDR,
+        runtime_args! {
+            TRANSFER_ARG_TARGET => *BOB_ADDR,
+            TRANSFER_ARG_AMOUNT => *TRANSFER_AMOUNT_1
+
+        },
+    )
+    .build();
+
+    builder.exec(transfer_request).commit().expect_success();
+
+    let alice_account = builder
+        .get_account(*ALICE_ADDR)
+        .expect("should have Alice's account");
+
+    let alice_main_purse = alice_account.main_purse();
+
+    let alice_balance_result_new = builder.get_purse_balance_new(alice_main_purse);
+
+    let state_root_hash = {
+        let post_state_hash = builder.get_post_state_hash();
+        Blake2bHash::try_from(post_state_hash.as_slice()).expect("should convert")
+    };
+
+    let (_main_purse_proof_new, balance_proof_new) = alice_balance_result_new
+        .proofs()
+        .expect("should have proofs");
+
+    assert_eq!(
+        core::validate_balance_proof(
+            &state_root_hash,
+            &main_purse_proof,
+            &balance_proof_new,
+            alice_main_purse.into(),
+            &alice_balance,
+        ),
+        Err(ValidationError::InvalidProofHash)
+    );
 }
