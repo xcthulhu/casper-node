@@ -15,6 +15,31 @@ pub enum BalanceResult {
     },
 }
 
+impl BalanceResult {
+    pub fn motes(&self) -> Option<&U512> {
+        match self {
+            BalanceResult::Success { motes, .. } => Some(motes),
+            _ => None,
+        }
+    }
+
+    pub fn proofs(
+        self,
+    ) -> Option<(
+        TrieMerkleProof<Key, StoredValue>,
+        TrieMerkleProof<Key, StoredValue>,
+    )> {
+        match self {
+            BalanceResult::Success {
+                main_purse_proof,
+                balance_proof,
+                ..
+            } => Some((*main_purse_proof, *balance_proof)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BalanceRequest {
     state_hash: Blake2bHash,

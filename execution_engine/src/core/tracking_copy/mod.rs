@@ -570,30 +570,42 @@ pub fn validate_balance_proof(
     let expected_balance_key = expected_purse_key
         .uref_to_hash()
         .ok_or_else(|| ValidationError::KeyIsNotAUref(expected_purse_key.to_owned()))?;
+
     if main_purse_proof.key() != &expected_balance_key {
         return Err(ValidationError::UnexpectedKey);
     }
+
     if hash != &main_purse_proof.compute_state_hash()? {
         return Err(ValidationError::InvalidProofHash);
     }
+
     let main_purse_proof_stored_value = main_purse_proof.value().to_owned();
+
     let purse_balance_clvalue: CLValue = main_purse_proof_stored_value
         .try_into()
         .map_err(|_| ValidationError::ValueToCLValueConversion)?;
+
     let purse_balance_key: Key = purse_balance_clvalue.into_t()?;
-    if &purse_balance_key != balance_proof.key() {
+
+    if balance_proof.key() != &purse_balance_key.normalize() {
         return Err(ValidationError::UnexpectedKey);
     }
+
     if hash != &balance_proof.compute_state_hash()? {
         return Err(ValidationError::InvalidProofHash);
     }
+
     let balance_proof_stored_value = balance_proof.value().to_owned();
+
     let balance_proof_clvalue: CLValue = balance_proof_stored_value
         .try_into()
         .map_err(|_| ValidationError::ValueToCLValueConversion)?;
+
     let balance_motes: U512 = balance_proof_clvalue.into_t()?;
+
     if expected_motes != &balance_motes {
         return Err(ValidationError::UnexpectedValue);
     }
+
     Ok(())
 }

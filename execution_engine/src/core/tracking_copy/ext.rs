@@ -180,7 +180,7 @@ where
             .uref_to_hash()
             .ok_or_else(|| Self::Error::KeyIsNotAURef { key: purse_key })?;
         let proof = match self
-            .read_with_proof(correlation_id, &balance_key)
+            .read_with_proof(correlation_id, &balance_key) // Key::Hash, so no need to normalize
             .map_err(Into::into)?
         {
             Some(proof) => proof,
@@ -200,7 +200,7 @@ where
         key: Key,
     ) -> Result<(Motes, TrieMerkleProof<Key, StoredValue>), Self::Error> {
         let proof = match self
-            .read_with_proof(correlation_id, &key)
+            .read_with_proof(correlation_id, &key.normalize())
             .map_err(Into::into)?
         {
             Some(proof) => proof,

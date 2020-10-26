@@ -224,7 +224,7 @@ impl Key {
         }
     }
 
-    /// Casts a [`Key::Uref`] to a [`Key::Hash`]
+    /// Casts a [`Key::URef`] to a [`Key::Hash`]
     pub fn uref_to_hash(&self) -> Option<Key> {
         let uref = self.as_uref()?;
         let addr = uref.addr();
