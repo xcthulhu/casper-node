@@ -158,11 +158,6 @@ fn get_balance_should_work() {
 
     let alice_balance_result_new = builder.get_purse_balance_new(alice_main_purse);
 
-    let state_root_hash = {
-        let post_state_hash = builder.get_post_state_hash();
-        Blake2bHash::try_from(post_state_hash.as_slice()).expect("should convert")
-    };
-
     let (_main_purse_proof_new, balance_proof_new) = alice_balance_result_new
         .proofs()
         .expect("should have proofs");
