@@ -11,7 +11,7 @@ use datasize::DataSize;
 use itertools::Itertools;
 use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 
 use self::round_success_meter::RoundSuccessMeter;
 use casper_types::{auction::BLOCK_REWARD, U512};
@@ -215,6 +215,7 @@ impl<I: NodeIdT, C: Context + 'static> HighwayProtocol<I, C> {
             .range(..=timestamp) // Inclusive range
             .map(|(past_due_timestamp, _)| past_due_timestamp.to_owned())
             .collect();
+        let loop_start = Timestamp::now();
         for past_due_timestamp in past_due_timestamps {
             if let Some(vertices_to_add) =
                 self.vertices_to_be_added_later.remove(&past_due_timestamp)
@@ -222,6 +223,10 @@ impl<I: NodeIdT, C: Context + 'static> HighwayProtocol<I, C> {
                 results.extend(self.add_vertices(vertices_to_add, rng))
             }
         }
+        warn!(
+            "add_past_due_stored_vertices loop took {time} ms",
+            time = loop_start.elapsed()
+        );
         results
     }
 
@@ -240,6 +245,7 @@ impl<I: NodeIdT, C: Context + 'static> HighwayProtocol<I, C> {
         // returned vertex that needs to be requeued, also return an `EnqueueVertex`
         // effect.
         let mut results = Vec::new();
+        let loop_start = Timestamp::now();
         while !pvvs.is_empty() {
             let mut state_changed = false;
             for (sender, pvv) in pvvs.drain(..) {
@@ -293,6 +299,10 @@ impl<I: NodeIdT, C: Context + 'static> HighwayProtocol<I, C> {
                 results.extend(self.detect_finality());
             }
         }
+        warn!(
+            "add_vertices loop took {time} ms",
+            time = loop_start.elapsed()
+        );
         results
     }
 
