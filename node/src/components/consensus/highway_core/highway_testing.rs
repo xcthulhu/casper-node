@@ -7,9 +7,12 @@ use std::{
 
 use hex_fmt::HexFmt;
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tracing::{trace, warn};
+
+use casper_execution_engine::{core::engine_state::GenesisAccount, shared::motes::Motes};
 
 use super::{
     active_validator::Effect,
@@ -35,8 +38,10 @@ use crate::{
         traits::{Context, ValidatorSecret},
         BlockContext,
     },
+    crypto::asymmetric_key::{PublicKey, SecretKey},
     types::Timestamp,
-    NodeRng,
+    utils::Loadable,
+    Chainspec, NodeRng,
 };
 
 type ConsensusValue = Vec<u32>;
@@ -1227,4 +1232,32 @@ mod test_harness {
             "Nodes saw different set of equivocators.",
         );
     }
+}
+
+lazy_static! {
+    pub static ref ALICE_SECRET_KEY: SecretKey =
+        SecretKey::ed25519_from_bytes(&[0; SecretKey::ED25519_LENGTH]).unwrap();
+    pub static ref ALICE_PUBLIC_KEY: PublicKey = PublicKey::from(ALICE_SECRET_KEY.deref());
+    pub static ref BOB_PRIVATE_KEY: SecretKey =
+        SecretKey::ed25519_from_bytes(&[1; SecretKey::ED25519_LENGTH]).unwrap();
+    pub static ref BOB_PUBLIC_KEY: PublicKey = PublicKey::from(BOB_PRIVATE_KEY.deref());
+}
+
+/// Loads the local chainspec and overrides timestamp and genesis account with the given stakes.
+pub fn new_test_chainspec(stakes: Vec<(PublicKey, u64)>) -> Chainspec {
+    let mut chainspec = Chainspec::from_resources("local/chainspec.toml");
+    chainspec.genesis.accounts = stakes
+        .into_iter()
+        .map(|(pk, stake)| {
+            let motes = Motes::new(stake.into());
+            GenesisAccount::new(pk.into(), pk.to_account_hash(), motes, motes)
+        })
+        .collect();
+    chainspec.genesis.timestamp = Timestamp::now();
+    chainspec.genesis.highway_config.genesis_era_start_timestamp = chainspec.genesis.timestamp;
+
+    // Every era has exactly three blocks.
+    chainspec.genesis.highway_config.minimum_era_height = 2;
+    chainspec.genesis.highway_config.era_duration = 0.into();
+    chainspec
 }

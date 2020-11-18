@@ -1,5 +1,5 @@
 use anyhow::Error;
-use casper_execution_engine::{core::engine_state::genesis::GenesisAccount, shared::motes::Motes};
+use casper_execution_engine::shared::motes::Motes;
 use derive_more::From;
 use prometheus::Registry;
 
@@ -8,12 +8,15 @@ use crate::{
     components::{
         consensus::{
             consensus_protocol::EraEnd,
+            highway_core::highway_testing::{
+                new_test_chainspec, ALICE_PUBLIC_KEY, ALICE_SECRET_KEY, BOB_PUBLIC_KEY,
+            },
             tests::mock_proto::{self, MockProto, NodeId},
             Config,
         },
         Component,
     },
-    crypto::asymmetric_key::{PublicKey, SecretKey},
+    crypto::asymmetric_key::PublicKey,
     effect::{
         announcements::ConsensusAnnouncement,
         requests::{
@@ -25,7 +28,7 @@ use crate::{
     protocol,
     reactor::{EventQueueHandle, QueueKind, Scheduler},
     testing::TestRng,
-    utils::{self, External, Loadable},
+    utils::{self, External},
     NodeRng,
 };
 
@@ -152,25 +155,6 @@ impl MockReactor {
     }
 }
 
-/// Loads the local chainspec and overrides timestamp and genesis account with the given stakes.
-fn new_test_chainspec(stakes: Vec<(PublicKey, u64)>) -> Chainspec {
-    let mut chainspec = Chainspec::from_resources("local/chainspec.toml");
-    chainspec.genesis.accounts = stakes
-        .into_iter()
-        .map(|(pk, stake)| {
-            let motes = Motes::new(stake.into());
-            GenesisAccount::new(pk.into(), pk.to_account_hash(), motes, motes)
-        })
-        .collect();
-    chainspec.genesis.timestamp = Timestamp::now();
-    chainspec.genesis.highway_config.genesis_era_start_timestamp = chainspec.genesis.timestamp;
-
-    // Every era has exactly three blocks.
-    chainspec.genesis.highway_config.minimum_era_height = 2;
-    chainspec.genesis.highway_config.era_duration = 0.into();
-    chainspec
-}
-
 async fn propose_and_finalize(
     es: &mut EraSupervisor<NodeId>,
     proposer: PublicKey,
@@ -245,15 +229,10 @@ async fn propose_and_finalize(
 async fn cross_era_slashing() -> Result<(), Error> {
     let mut rng = TestRng::new();
 
-    let alice_sk = SecretKey::random(&mut rng);
-    let alice_pk = PublicKey::from(&alice_sk);
-    let bob_sk = SecretKey::random(&mut rng);
-    let bob_pk = PublicKey::from(&bob_sk);
-
     let (mut es, effects) = {
-        let chainspec = new_test_chainspec(vec![(alice_pk, 10), (bob_pk, 100)]);
+        let chainspec = new_test_chainspec(vec![(*ALICE_PUBLIC_KEY, 10), (*BOB_PUBLIC_KEY, 100)]);
         let config = Config {
-            secret_key_path: External::Loaded(alice_sk),
+            secret_key_path: External::Loaded(ALICE_SECRET_KEY.clone()),
         };
 
         let registry = Registry::new();
@@ -267,8 +246,8 @@ async fn cross_era_slashing() -> Result<(), Error> {
             WithDir::new("tmp", config),
             effect_builder,
             vec![
-                (alice_pk, Motes::new(10.into())),
-                (bob_pk, Motes::new(100.into())),
+                (*ALICE_PUBLIC_KEY, Motes::new(10.into())),
+                (*BOB_PUBLIC_KEY, Motes::new(100.into())),
             ],
             &chainspec,
             Default::default(), // genesis state root hash
@@ -279,28 +258,29 @@ async fn cross_era_slashing() -> Result<(), Error> {
     };
     assert!(effects.is_empty());
 
-    let fb = propose_and_finalize(&mut es, bob_pk, vec![alice_pk], &mut rng).await;
+    let fb =
+        propose_and_finalize(&mut es, *BOB_PUBLIC_KEY, vec![*ALICE_PUBLIC_KEY], &mut rng).await;
     let expected_fb = FinalizedBlock::new(
         fb.proto_block().clone(),
         fb.timestamp(),
         None, // not the era's last block
         EraId(0),
         0, // height
-        bob_pk,
+        *BOB_PUBLIC_KEY,
     );
     assert_eq!(expected_fb, fb);
 
-    let fb = propose_and_finalize(&mut es, bob_pk, vec![], &mut rng).await;
+    let fb = propose_and_finalize(&mut es, *BOB_PUBLIC_KEY, vec![], &mut rng).await;
     let expected_fb = FinalizedBlock::new(
         fb.proto_block().clone(),
         fb.timestamp(),
         Some(EraEnd {
-            equivocators: vec![alice_pk],
+            equivocators: vec![*ALICE_PUBLIC_KEY],
             rewards: Default::default(),
         }), // the era's last block
         EraId(0),
         1, // height
-        bob_pk,
+        *BOB_PUBLIC_KEY,
     );
     assert_eq!(expected_fb, fb);
 
