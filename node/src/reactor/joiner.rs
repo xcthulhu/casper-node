@@ -10,6 +10,7 @@ use std::{
 
 use datasize::DataSize;
 use derive_more::From;
+use memory_metrics::MemoryMetrics;
 use prometheus::Registry;
 use serde::Serialize;
 use tracing::{error, info, warn};
@@ -24,6 +25,8 @@ use crate::components::{
     linear_chain_fast_sync::LinearChainFastSync as LinearChainSync,
 };
 
+#[cfg(test)]
+use crate::testing::network::NetworkedReactor;
 use crate::{
     components::{
         block_executor::{self, BlockExecutor},
@@ -69,8 +72,6 @@ use crate::{
     utils::{Source, WithDir},
     NodeRng,
 };
-
-use memory_metrics::MemoryMetrics;
 
 /// Top-level event for the reactor.
 #[derive(Debug, From, Serialize)]
@@ -890,5 +891,25 @@ impl Reactor {
         self.small_network.finalize().await;
         self.rest_server.finalize().await;
         config
+    }
+}
+
+#[cfg(test)]
+impl NetworkedReactor for Reactor {
+    type NodeId = NodeId;
+    fn node_id(&self) -> Self::NodeId {
+        if env::var(ENABLE_SMALL_NET_ENV_VAR).is_ok() {
+            self.small_network.node_id()
+        } else {
+            self.network.node_id()
+        }
+    }
+}
+
+#[cfg(test)]
+impl Reactor {
+    /// Inspect consensus.
+    pub(crate) fn consensus(&self) -> &EraSupervisor<NodeId> {
+        &self.consensus
     }
 }

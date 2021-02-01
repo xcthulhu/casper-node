@@ -1,5 +1,7 @@
 //! Reactor used to initialize a node.
 
+#[cfg(test)]
+use std::env;
 use std::fmt::{self, Display, Formatter};
 
 use datasize::DataSize;
@@ -8,6 +10,8 @@ use prometheus::Registry;
 use serde::Serialize;
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::{components::network::ENABLE_SMALL_NET_ENV_VAR, testing::network::NetworkedReactor};
 use crate::{
     components::{
         chainspec_loader::{self, ChainspecLoader},
@@ -195,5 +199,17 @@ impl reactor::Reactor for Reactor {
 
     fn is_stopped(&mut self) -> bool {
         self.chainspec_loader.is_stopped()
+    }
+}
+
+#[cfg(test)]
+impl NetworkedReactor for Reactor {
+    type NodeId = NodeId;
+    fn node_id(&self) -> Self::NodeId {
+        if env::var(ENABLE_SMALL_NET_ENV_VAR).is_ok() {
+            NodeId::from(&self.small_network_identity)
+        } else {
+            NodeId::from(&self.network_identity)
+        }
     }
 }

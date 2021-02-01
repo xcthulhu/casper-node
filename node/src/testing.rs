@@ -6,6 +6,7 @@
 mod condition_check_reactor;
 pub mod network;
 mod test_rng;
+mod three_stage_test_reactor;
 
 use std::{
     any::type_name,
@@ -29,6 +30,7 @@ use crate::{
 use anyhow::Context;
 pub(crate) use condition_check_reactor::ConditionCheckReactor;
 pub(crate) use test_rng::TestRng;
+pub(crate) use three_stage_test_reactor::ThreeStageTestReactor;
 
 // Lower bound for the port, below there's a high chance of hitting a system service.
 const PORT_LOWER_BOUND: u16 = 10_000;
