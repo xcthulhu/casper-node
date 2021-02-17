@@ -118,9 +118,11 @@ pub trait ItemFetcher<T: Item + 'static> {
             Ok(message) => {
                 let mut effects = effect_builder.send_message(peer.clone(), message).ignore();
 
+                let timeout = self.peer_timeout();
+
                 effects.extend(
                     effect_builder
-                        .set_timeout(self.peer_timeout())
+                        .set_timeout(timeout)
                         .event(move |_| Event::TimeoutPeer { id, peer }),
                 );
 

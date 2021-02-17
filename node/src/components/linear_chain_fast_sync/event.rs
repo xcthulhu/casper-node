@@ -1,17 +1,38 @@
-use crate::types::{ActivationPoint, Block, BlockHash};
-
 use std::fmt::{Debug, Display};
+
+use crate::{
+    components::fetcher::FetchResult,
+    types::{Block, BlockHash},
+};
+use casper_execution_engine::{
+    shared::{newtypes::Blake2bHash, stored_value::StoredValue},
+    storage::trie::Trie,
+};
+use casper_types::Key;
 
 #[derive(Debug)]
 pub enum Event<I> {
-    Start(I),
-    GetBlockHashResult(BlockHash, BlockByHashResult<I>),
-    GetBlockHeightResult(u64, BlockByHeightResult<I>),
-    GetDeploysResult(DeploysResult<I>),
-    StartDownloadingDeploys,
+    /// New peer connected event.  The joiner process requires a network peer to start.
     NewPeerConnected(I),
+
+    /// Result of requesting a block by hash from network peers.
+    GetBlockHashResult(BlockHash, BlockByHashResult<I>),
+
+    /// Result of requesting a [Trie] from network peers.
+    GetTrieResult(Blake2bHash, TrieResult<I>),
+
+    /// Result of requesting a block by height from network peers.
+    GetBlockHeightResult(u64, BlockByHeightResult<I>),
+
+    /// Result of validating a block?
+    // TODO: Not clear what this has to do with deploys
+    GetDeploysResult(DeploysResult<I>),
+
+    /// Signal to start downloading deploys
+    StartDownloadingDeploys,
+
+    /// Signal from linear chain that block has been processed.
     BlockHandled(Box<Block>),
-    GotUpgradeActivationPoint(ActivationPoint),
 }
 
 #[derive(Debug)]
@@ -21,17 +42,19 @@ pub enum DeploysResult<I> {
 }
 
 #[derive(Debug)]
-pub enum BlockByHashResult<I> {
+pub enum FetchResultOrAbsent<T, I> {
+    FetchResult(FetchResult<T, I>),
     Absent(I),
-    FromStorage(Box<Block>),
-    FromPeer(Box<Block>, I),
 }
 
-#[derive(Debug)]
-pub enum BlockByHeightResult<I> {
-    Absent(I),
-    FromStorage(Box<Block>),
-    FromPeer(Box<Block>, I),
+pub type BlockByHashResult<I> = FetchResultOrAbsent<Block, I>;
+pub type TrieResult<I> = FetchResultOrAbsent<Trie<Key, StoredValue>, I>;
+pub type BlockByHeightResult<I> = FetchResultOrAbsent<Block, I>;
+
+/// Contains either a found object pointer or a retry strategy.
+pub enum FoundOrRetry<O, R> {
+    Found(O),
+    Retry(R),
 }
 
 impl<I> Display for Event<I>
@@ -40,9 +63,11 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Event::Start(init_peer) => write!(f, "Start syncing from peer {}.", init_peer),
             Event::GetBlockHashResult(block_hash, r) => {
                 write!(f, "Get block result for {}: {:?}", block_hash, r)
+            }
+            Event::GetTrieResult(trie_key, r) => {
+                write!(f, "Get trie result for {}: {:?}", trie_key, r)
             }
             Event::GetDeploysResult(result) => {
                 write!(f, "Get deploys for block result {:?}", result)
@@ -60,9 +85,6 @@ where
             }
             Event::GetBlockHeightResult(height, res) => {
                 write!(f, "Get block result for height {}: {:?}", height, res)
-            }
-            Event::GotUpgradeActivationPoint(activation_point) => {
-                write!(f, "new upgrade activation point: {:?}", activation_point)
             }
         }
     }

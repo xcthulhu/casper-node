@@ -407,7 +407,18 @@ impl<REv> EffectBuilder<REv> {
                    a component will likely be stuck from now on ", type_name::<T>());
 
             // We cannot produce any value to satisfy the request, so all that's left is panicking.
-            panic!("request not answerable");
+            panic!(
+                "error: {:?} \n
+                 \n
+                 queue kind: {:?} \n\
+                 \n
+                 request for {} channel closed, this is a serious bug --- \
+                 a component will likely be stuck from now on \n
+                 ",
+                type_name::<T>(),
+                err,
+                queue_kind
+            );
         })
     }
 
@@ -822,6 +833,26 @@ impl<REv> EffectBuilder<REv> {
         self.make_request(
             |responder| ContractRuntimeRequest::ReadTrie {
                 trie_key,
+                responder,
+            },
+            QueueKind::Regular,
+        )
+        .await
+    }
+
+    pub(crate) async fn fetch_trie<I>(
+        self,
+        trie_key: Blake2bHash,
+        peer: I,
+    ) -> Option<FetchResult<Trie<Key, StoredValue>, I>>
+    where
+        REv: From<FetcherRequest<I, Trie<Key, StoredValue>>>,
+        I: Send + 'static,
+    {
+        self.make_request(
+            |responder| FetcherRequest::Fetch {
+                id: trie_key,
+                peer,
                 responder,
             },
             QueueKind::Regular,
