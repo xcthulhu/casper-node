@@ -426,11 +426,6 @@ where
         self.handling_wrapper(effect_builder, rng)
             .handle_consensus_outcomes(current_era, outcomes)
     }
-
-    /// Returns true if initialization of the first eras is finished.
-    pub(crate) fn is_initialized(&self) -> bool {
-        self.is_initialized
-    }
 }
 
 /// A mutable `EraSupervisor` reference, together with an `EffectBuilder`.

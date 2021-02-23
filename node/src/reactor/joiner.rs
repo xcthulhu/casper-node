@@ -16,7 +16,7 @@ use prometheus::Registry;
 use serde::Serialize;
 use tracing::{debug, error, info, warn};
 
-use casper_types::{PublicKey, U512};
+use casper_types::{Key, PublicKey, U512};
 
 #[cfg(not(feature = "fast-sync"))]
 use crate::components::linear_chain_sync::{self, LinearChainSync};
@@ -69,10 +69,11 @@ use crate::{
         validator::{self, Error, ValidatorInitConfig},
         EventQueueHandle, Finalize, ReactorExit,
     },
-    types::{Block, BlockByHeight, Deploy, ExitCode, NodeId, ProtoBlock, Tag, Timestamp},
+    types::{Block, BlockByHeight, Deploy, NodeId, ProtoBlock, Tag, Timestamp},
     utils::{Source, WithDir},
     NodeRng,
 };
+use casper_execution_engine::{shared::stored_value::StoredValue, storage::trie::Trie};
 
 /// Top-level event for the reactor.
 #[allow(clippy::large_enum_variant)]
@@ -119,6 +120,10 @@ pub enum Event {
     #[from]
     BlockFetcher(#[serde(skip_serializing)] fetcher::Event<Block>),
 
+    /// Trie fetcher event.
+    #[from]
+    TrieFetcher(#[serde(skip_serializing)] fetcher::Event<Trie<Key, StoredValue>>),
+
     /// Linear chain (by height) fetcher event.
     #[from]
     BlockByHeightFetcher(#[serde(skip_serializing)] fetcher::Event<BlockByHeight>),
@@ -163,6 +168,10 @@ pub enum Event {
     /// Linear chain block by hash fetcher request.
     #[from]
     BlockFetcherRequest(#[serde(skip_serializing)] FetcherRequest<NodeId, Block>),
+
+    /// Trie fetcher request.
+    #[from]
+    TrieFetcherRequest(#[serde(skip_serializing)] FetcherRequest<NodeId, Trie<Key, StoredValue>>),
 
     /// Linear chain block by height fetcher request.
     #[from]
@@ -328,6 +337,12 @@ impl Display for Event {
                 write!(f, "chainspec loader announcement: {}", ann)
             }
             Event::StateStoreRequest(req) => write!(f, "state store request: {}", req),
+            Event::TrieFetcher(trie) => {
+                write!(f, "trie fetcher event: {}", trie)
+            }
+            Event::TrieFetcherRequest(req) => {
+                write!(f, "trie fetcher request: {}", req)
+            }
         }
     }
 }
@@ -352,6 +367,8 @@ pub struct Reactor {
     pub(super) consensus: EraSupervisor<NodeId>,
     // Handles request for linear chain block by height.
     pub(super) block_by_height_fetcher: Fetcher<BlockByHeight>,
+    // Handles request for fetching tries from the network.
+    pub(super) trie_fetcher: Fetcher<Trie<Key, StoredValue>>,
     #[data_size(skip)]
     pub(super) deploy_acceptor: DeployAcceptor,
     #[data_size(skip)]
@@ -377,7 +394,7 @@ impl reactor::Reactor for Reactor {
         initializer: Self::Config,
         registry: &Registry,
         event_queue: EventQueueHandle<Self::Event>,
-        _rng: &mut NodeRng,
+        rng: &mut NodeRng,
     ) -> Result<(Self, Effects<Self::Event>), Self::Error> {
         let (root, initializer) = initializer.into_parts();
 
@@ -419,6 +436,8 @@ impl reactor::Reactor for Reactor {
         )?;
 
         let linear_chain_fetcher = Fetcher::new("linear_chain", config.fetcher, &registry)?;
+        let trie_fetcher: Fetcher<Trie<Key, StoredValue>> =
+            Fetcher::new("trie_fetcher", config.fetcher, &registry)?;
 
         let mut effects = reactor::wrap_effects(Event::Network, network_effects);
         effects.extend(reactor::wrap_effects(
@@ -494,13 +513,12 @@ impl reactor::Reactor for Reactor {
         let maybe_next_activation_point = chainspec_loader
             .next_upgrade()
             .map(|next_upgrade| next_upgrade.activation_point());
+
         let linear_chain_sync = LinearChainSync::new::<Error>(
             registry,
-            chainspec_loader.chainspec(),
-            &storage,
             init_hash,
             validator_weights.clone(),
-            maybe_next_activation_point,
+            rng.clone(),
         )?;
 
         // Used to decide whether era should be activated.
@@ -535,6 +553,7 @@ impl reactor::Reactor for Reactor {
                 contract_runtime,
                 linear_chain_sync,
                 linear_chain_fetcher,
+                trie_fetcher,
                 block_validator,
                 deploy_fetcher,
                 block_executor,
@@ -628,6 +647,24 @@ impl reactor::Reactor for Reactor {
                     self.dispatch_event(effect_builder, rng, Event::BlockByHeightFetcher(event))
                 }
                 Message::GetResponse {
+                    tag: Tag::Trie,
+                    serialized_item,
+                } => {
+                    let trie: Box<Trie<Key, StoredValue>> =
+                        match bincode::deserialize(&serialized_item) {
+                            Ok(trie) => Box::new(trie),
+                            Err(err) => {
+                                error!("failed to decode trie from {}: {}", sender, err);
+                                return Effects::new();
+                            }
+                        };
+                    let event = fetcher::Event::GotRemotely {
+                        item: trie,
+                        source: Source::Peer(sender),
+                    };
+                    self.dispatch_event(effect_builder, rng, Event::TrieFetcher(event))
+                }
+                Message::GetResponse {
                     tag: Tag::Deploy,
                     serialized_item,
                 } => {
@@ -719,6 +756,13 @@ impl reactor::Reactor for Reactor {
                 self.block_by_height_fetcher
                     .handle_event(effect_builder, rng, event),
             ),
+            Event::TrieFetcher(event) => reactor::wrap_effects(
+                Event::TrieFetcher,
+                self.trie_fetcher.handle_event(effect_builder, rng, event),
+            ),
+            Event::TrieFetcherRequest(request) => {
+                self.dispatch_event(effect_builder, rng, Event::TrieFetcher(request.into()))
+            }
             Event::DeployFetcherRequest(request) => {
                 self.dispatch_event(effect_builder, rng, Event::DeployFetcher(request.into()))
             }
@@ -894,29 +938,45 @@ impl reactor::Reactor for Reactor {
             Event::ChainspecLoaderAnnouncement(
                 ChainspecLoaderAnnouncement::UpgradeActivationPointRead(next_upgrade),
             ) => {
-                let reactor_event = Event::ChainspecLoader(
-                    chainspec_loader::Event::GotNextUpgrade(next_upgrade.clone()),
-                );
-                let mut effects = self.dispatch_event(effect_builder, rng, reactor_event);
+                // TODO: Clean me up once fast-sync is stable
+                let mut effects = Effects::new();
+
+                #[cfg(not(feature = "fast-sync"))]
+                effects.extend(self.dispatch_event(
+                    effect_builder,
+                    rng,
+                    Event::LinearChainSync(linear_chain_sync::Event::GotUpgradeActivationPoint(
+                        next_upgrade.clone().activation_point(),
+                    )),
+                ));
 
                 let reactor_event =
-                    Event::LinearChainSync(linear_chain_sync::Event::GotUpgradeActivationPoint(
-                        next_upgrade.activation_point(),
-                    ));
+                    Event::ChainspecLoader(chainspec_loader::Event::GotNextUpgrade(next_upgrade));
                 effects.extend(self.dispatch_event(effect_builder, rng, reactor_event));
+
                 effects
             }
         }
     }
 
+    #[cfg(not(feature = "fast-sync"))]
     fn maybe_exit(&self) -> Option<ReactorExit> {
         (self.linear_chain_sync.is_synced() && self.consensus.is_initialized()).then(|| {
             if self.linear_chain_sync.stopped_for_upgrade() {
-                ReactorExit::ProcessShouldExit(ExitCode::Success)
+                ReactorExit::ProcessShouldExit(crate::types::ExitCode::Success)
             } else {
                 ReactorExit::ProcessShouldContinue
             }
         })
+    }
+
+    #[cfg(feature = "fast-sync")]
+    fn maybe_exit(&self) -> Option<ReactorExit> {
+        if self.linear_chain_sync.is_synced() {
+            Some(ReactorExit::ProcessShouldContinue)
+        } else {
+            None
+        }
     }
 
     fn update_metrics(&mut self, event_queue_handle: EventQueueHandle<Self::Event>) {

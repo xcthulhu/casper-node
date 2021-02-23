@@ -32,7 +32,7 @@ use casper_execution_engine::{
         transaction_source::lmdb::LmdbEnvironment, trie_store::lmdb::LmdbTrieStore,
     },
 };
-use casper_types::{system::auction::ValidatorWeights, ProtocolVersion};
+use casper_types::{system::auction::ValidatorWeights, Key, ProtocolVersion};
 
 use crate::{
     components::Component,
@@ -40,6 +40,10 @@ use crate::{
     types::Chainspec,
     utils::WithDir,
     NodeRng, StorageConfig,
+};
+use casper_execution_engine::{
+    shared::{newtypes::Blake2bHash, stored_value::StoredValue},
+    storage::trie::Trie,
 };
 
 /// The contract runtime components.
@@ -601,5 +605,14 @@ impl ContractRuntime {
             protocol_version,
             &ee_config,
         )
+    }
+
+    /// Reads a `Trie` from the state if it is present
+    pub fn read_trie(
+        &self,
+        trie_key: Blake2bHash,
+    ) -> Result<Option<Trie<Key, StoredValue>>, Error> {
+        let correlation_id = CorrelationId::new();
+        self.engine_state.read_trie(correlation_id, trie_key)
     }
 }

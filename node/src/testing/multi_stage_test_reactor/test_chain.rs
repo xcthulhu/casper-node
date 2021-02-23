@@ -113,7 +113,7 @@ impl TestChain {
         // Make the genesis timestamp 45 seconds from now, to allow for all validators to start up.
         chainspec.network_config.timestamp = Timestamp::now() + 45000.into();
 
-        chainspec.core_config.minimum_era_height = 4;
+        chainspec.core_config.minimum_era_height = 1;
         chainspec.highway_config.finality_threshold_fraction = Ratio::new(34, 100);
         chainspec.core_config.era_duration = 10.into();
 
@@ -336,6 +336,48 @@ async fn test_joiner() {
     );
 
     // Get the first switch block hash
+    let era_to_join = 2;
+    let switch_block = get_switch_block_hash(era_to_join, &mut chain.network, &mut rng).await;
+
+    // Have a node join the network with that hash
+    info!("Joining with trusted hash {}", switch_block);
+    let joiner_node_secret_key = SecretKey::random(&mut rng);
+    chain
+        .add_node(false, joiner_node_secret_key, Some(switch_block), &mut rng)
+        .await;
+
+    assert_eq!(
+        chain.network.nodes().len(),
+        2,
+        "There should be two validators in the network (one bonded and one read only)"
+    );
+
+    let era_num = era_to_join + 2;
+    info!("Waiting for Era {} to end", era_num);
+    chain
+        .network
+        .settle_on(&mut rng, is_in_era(era_num), Duration::from_secs(600))
+        .await;
+}
+
+#[tokio::test]
+async fn test_joiner_network() {
+    testing::init_logging();
+
+    const INITIAL_NETWORK_SIZE: usize = 5;
+
+    let mut rng = crate::new_rng();
+
+    // Create a chain with just one node
+    let mut chain = TestChain::new(INITIAL_NETWORK_SIZE, &mut rng).await;
+
+    assert_eq!(
+        chain.network.nodes().len(),
+        INITIAL_NETWORK_SIZE,
+        "Wrong number of bonded validators in the network"
+    );
+
+    // Get the first switch block hash
     let first_switch_block_hash = get_switch_block_hash(1, &mut chain.network, &mut rng).await;
 
     // Have a node join the network with that hash
@@ -352,8 +394,8 @@ async fn test_joiner() {
 
     assert_eq!(
         chain.network.nodes().len(),
-        2,
-        "There should be two validators in the network (one bonded and one read only)"
+        INITIAL_NETWORK_SIZE + 1,
+        "There should be one more validator in the network"
     );
 
     let era_num = 3;

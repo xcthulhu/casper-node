@@ -84,7 +84,6 @@ use casper_execution_engine::{
         execute_request::ExecuteRequest,
         execution_result::ExecutionResults,
         genesis::GenesisResult,
-        put_trie::InsertedTrieKeyAndMissingDescendants,
         step::{StepRequest, StepResult},
         upgrade::{UpgradeConfig, UpgradeResult},
         BalanceRequest, BalanceResult, QueryRequest, QueryResult, MAX_PAYMENT,
@@ -226,6 +225,13 @@ pub trait EffectExt: Future + Send {
 
     /// Finalizes a future into an effect that runs but drops the result.
     fn ignore<Ev>(self) -> Effects<Ev>;
+
+    /// Finalize a future returning multiple results into zero or more events.
+    fn into_effects<U>(self) -> Effects<U>
+    where
+        Self::Output: IntoIterator<Item = U>,
+        U: 'static,
+        Self: Sized;
 }
 
 /// Effect extension for futures, used to convert futures returning a `Result` into two different
@@ -287,6 +293,13 @@ where
 
     fn ignore<Ev>(self) -> Effects<Ev> {
         smallvec![self.map(|_| Multiple::new()).boxed()]
+    }
+
+    fn into_effects<U>(self) -> Effects<U>
+    where
+        Self::Output: IntoIterator<Item = U>,
+    {
+        smallvec![self.map(|output| output.into_iter().collect()).boxed()]
     }
 }
 
@@ -407,7 +420,18 @@ impl<REv> EffectBuilder<REv> {
                    a component will likely be stuck from now on ", type_name::<T>());
 
             // We cannot produce any value to satisfy the request, so all that's left is panicking.
-            panic!("request not answerable");
+            panic!(
+                "error: {:?} \n
+                 \n
+                 queue kind: {:?} \n\
+                 \n
+                 request for {} channel closed, this is a serious bug --- \
+                 a component will likely be stuck from now on \n
+                 ",
+                type_name::<T>(),
+                err,
+                queue_kind
+            );
         })
     }
 
@@ -827,12 +851,31 @@ impl<REv> EffectBuilder<REv> {
         .await
     }
 
+    pub(crate) async fn fetch_trie<I>(
+        self,
+        trie_key: Blake2bHash,
+        peer: I,
+    ) -> Option<FetchResult<Trie<Key, StoredValue>, I>>
+    where
+        REv: From<FetcherRequest<I, Trie<Key, StoredValue>>>,
+        I: Send + 'static,
+    {
+        self.make_request(
+            |responder| FetcherRequest::Fetch {
+                id: trie_key,
+                peer,
+                responder,
+            },
+            QueueKind::Regular,
+        )
+        .await
+    }
+
     /// Puts a trie into the trie store and asynchronously returns any missing descendant trie keys.
-    #[allow(unused)]
     pub(crate) async fn put_trie_and_find_missing_descendant_trie_keys(
         self,
         trie: Box<Trie<Key, StoredValue>>,
-    ) -> Result<InsertedTrieKeyAndMissingDescendants, engine_state::Error>
+    ) -> Result<Vec<Blake2bHash>, engine_state::Error>
     where
         REv: From<ContractRuntimeRequest>,
     {

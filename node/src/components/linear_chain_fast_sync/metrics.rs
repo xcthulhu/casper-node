@@ -5,17 +5,22 @@ use prometheus::{Histogram, HistogramOpts, Registry};
 #[derive(Debug)]
 pub struct LinearChainSyncMetrics {
     get_block_by_hash: Histogram,
+    get_trie: Histogram,
     get_block_by_height: Histogram,
     get_deploys: Histogram,
     request_start: Instant,
 }
 
-const GET_BLOCK_BY_HASH: &str = "linear_chain_sync_get_block_by_hash";
-const GET_BLOCK_BY_HASH_HELP: &str = "histogram of linear_chain_sync get_block_by_hash request";
-const GET_BLOCK_BY_HEIGHT: &str = "linear_chain_sync_get_block_by_height";
-const GET_BLOCK_BY_HEIGHT_HELP: &str = "histogram of linear_chain_sync get_block_by_height request";
-const GET_DEPLOYS: &str = "linear_chain_sync_get_deploys";
-const GET_DEPLOYS_HELP: &str = "histogram of linear_chain_sync get_deploys request";
+const GET_BLOCK_BY_HASH: &str = "linear_chain_fast_sync_get_block_by_hash";
+const GET_BLOCK_BY_HASH_HELP: &str =
+    "histogram of linear_chain_fast_sync get_block_by_hash request";
+const GET_TRIE: &str = "linear_chain_fast_sync_get_trie";
+const GET_TRIE_HELP: &str = "histogram of linear_chain_fast_sync get_trie request";
+const GET_BLOCK_BY_HEIGHT: &str = "linear_chain_fast_sync_get_block_by_height";
+const GET_BLOCK_BY_HEIGHT_HELP: &str =
+    "histogram of linear_chain_fast_sync get_block_by_height request";
+const GET_DEPLOYS: &str = "linear_chain_fast_sync_get_deploys";
+const GET_DEPLOYS_HELP: &str = "histogram of linear_chain_fast_sync get_deploys request";
 
 /// Value of upper bound of histogram.
 const EXPONENTIAL_BUCKET_START: f64 = 0.01;
@@ -49,6 +54,7 @@ impl LinearChainSyncMetrics {
                 GET_BLOCK_BY_HASH,
                 GET_BLOCK_BY_HASH_HELP,
             )?,
+            get_trie: register_histogram_metric(registry, GET_TRIE, GET_TRIE_HELP)?,
             get_block_by_height: register_histogram_metric(
                 registry,
                 GET_BLOCK_BY_HEIGHT,

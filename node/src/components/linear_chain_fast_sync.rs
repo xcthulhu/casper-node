@@ -1,122 +1,379 @@
 //! Fast linear chain synchronizer.
 mod event;
 mod metrics;
-mod peers;
+mod peer_pool;
 mod state;
-mod traits;
 
-use std::{collections::BTreeMap, convert::Infallible, fmt::Display, mem};
+use std::{
+    collections::BTreeMap,
+    convert::Infallible,
+    fmt::{Debug, Display},
+    mem,
+    ops::DerefMut,
+    sync::Arc,
+    time::Duration,
+};
 
 use datasize::DataSize;
+use futures::future;
 use prometheus::Registry;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
 
-use casper_types::{PublicKey, U512};
-
-use self::event::{BlockByHashResult, DeploysResult};
-
-use super::{
-    fetcher::FetchResult,
-    storage::{self, Storage},
-    Component,
+use casper_execution_engine::{
+    shared::{newtypes::Blake2bHash, stored_value::StoredValue},
+    storage::trie::Trie,
 };
+use casper_types::{Key, PublicKey, U512};
+
 use crate::{
-    effect::{EffectBuilder, EffectExt, EffectOptionExt, Effects},
-    types::{
-        ActivationPoint, Block, BlockByHeight, BlockHash, BlockHeader, Chainspec, FinalizedBlock,
+    components::{
+        fetcher::FetchResult,
+        linear_chain_fast_sync::{
+            event::{BlockByHashResult, BlockByHeightResult, DeploysResult, FoundOrRetry},
+            peer_pool::{OldPeers, PeerPool},
+            state::State,
+        },
+        storage, Component,
     },
+    effect::{
+        requests::{
+            BlockExecutorRequest, BlockValidationRequest, ContractRuntimeRequest, FetcherRequest,
+        },
+        EffectBuilder, EffectExt, EffectOptionExt, Effects,
+    },
+    types::{Block, BlockByHeight, BlockHash, BlockHeader, FinalizedBlock, Item},
     NodeRng,
 };
-use event::BlockByHeightResult;
+
 pub use event::Event;
 pub use metrics::LinearChainSyncMetrics;
-pub use peers::PeersState;
-pub use state::State;
-pub use traits::ReactorEventT;
+
+const TIMEOUT_DURATION: Duration = Duration::from_millis(1000);
+const RETRY_COUNT: u8 = 5;
+
+/// Fetch a block header from the network using its block hash.
+async fn fetch_header_by_block_hash<REv, I>(
+    effect_builder: EffectBuilder<REv>,
+    peer_pool_mutex: Arc<Mutex<PeerPool<I>>>,
+    block_hash: BlockHash,
+) -> BlockHeader
+where
+    REv: From<FetcherRequest<I, Block>>,
+    I: Clone + Eq + std::hash::Hash + Send + 'static,
+{
+    for _ in 0..RETRY_COUNT {
+        for peer in peer_pool_mutex.lock().await.get_peers() {
+            // TODO: fetch header instead of block
+            match effect_builder.fetch_block(block_hash, peer).await {
+                Some(FetchResult::FromStorage(block)) => return block.header().clone(),
+                Some(FetchResult::FromPeer(block, peer)) => {
+                    if block_hash != block.header().hash() {
+                        peer_pool_mutex.lock().await.ban(&peer);
+                    } else {
+                        return block.header().clone();
+                    }
+                }
+                None => (),
+            }
+        }
+        tokio::time::delay_for(TIMEOUT_DURATION).await;
+    }
+    panic!("Could not find block header from peers: {}", block_hash)
+}
+
+/// Query all of the peers for a trie, put the trie found from the network
+/// in the trie-store, and return any outstanding descendant tries.
+async fn fetch_trie<REv, I>(
+    effect_builder: EffectBuilder<REv>,
+    peer_pool_mutex: Arc<Mutex<PeerPool<I>>>,
+    trie_key: Blake2bHash,
+) -> Vec<Blake2bHash>
+where
+    REv: From<ContractRuntimeRequest> + From<FetcherRequest<I, Trie<Key, StoredValue>>>,
+    I: Clone + Eq + std::hash::Hash + Send + 'static,
+{
+    for _ in 0..RETRY_COUNT {
+        for peer in peer_pool_mutex.lock().await.get_peers() {
+            let trie = match effect_builder.fetch_trie(trie_key, peer).await {
+                Some(FetchResult::FromStorage(trie)) => trie,
+                Some(FetchResult::FromPeer(trie, peer)) => {
+                    if trie_key != trie.id() {
+                        peer_pool_mutex.lock().await.ban(&peer);
+                        continue;
+                    } else {
+                        trie
+                    }
+                }
+                None => continue,
+            };
+            return effect_builder
+                .put_trie_and_find_missing_descendant_trie_keys(trie)
+                .await
+                .expect("Could not insert trie");
+        }
+        tokio::time::delay_for(TIMEOUT_DURATION).await;
+    }
+    panic!("Could not find trie from peers: {}", trie_key)
+}
+
+async fn fast_sync<REv, I>(
+    effect_builder: EffectBuilder<REv>,
+    peer_pool_mutex: Arc<Mutex<PeerPool<I>>>,
+    trusted_hash: BlockHash,
+) where
+    REv: From<FetcherRequest<I, Block>>
+        + From<FetcherRequest<I, Trie<Key, StoredValue>>>
+        + From<ContractRuntimeRequest>,
+    I: Clone + Eq + std::hash::Hash + Send + 'static,
+{
+    let trusted_header =
+        fetch_header_by_block_hash(effect_builder, peer_pool_mutex.clone(), trusted_hash).await;
+    // TODO: Check that trusted header has era > last_upgrade_or_genesis + 1;
+    // TODO: If latest header has version greater than ours, crash
+    let mut outstanding_trie_keys =
+        vec![Blake2bHash::from(trusted_header.state_root_hash().clone())];
+    while !outstanding_trie_keys.is_empty() {
+        outstanding_trie_keys = future::join_all(
+            outstanding_trie_keys
+                .into_iter()
+                .map(|trie_key| fetch_trie(effect_builder, peer_pool_mutex.clone(), trie_key)),
+        )
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    }
+}
 
 #[derive(DataSize, Debug)]
 pub(crate) struct LinearChainFastSync<I> {
-    peers: PeersState<I>,
-    state: State,
+    /// Mutex containing the pool of peers we are connected to.
+    peer_pool_mutex: Arc<Mutex<PeerPool<I>>>,
+
+    /// The trusted hash we are using to sync.
+    trusted_hash: Option<BlockHash>,
+
+    /// The validators and their weights from genesis.
+    genesis_validator_weights: BTreeMap<PublicKey, U512>,
+
+    ////////////////////////////////////
     #[data_size(skip)]
     metrics: LinearChainSyncMetrics,
+
+    /// The phase of the linear chain sync.
+    state: State,
+
+    /// Initial peer
+    initial_peer_id: Option<I>,
+
+    /// Peers to query for data.  Misbehaving peers will be banned.
+    old_peers: OldPeers<I>,
+
+    /// The header for the trusted hash.
+    trusted_header: Option<BlockHeader>,
+
+    /// During synchronization we might see new eras being created.
+    /// Track the highest block height and wait until it's handled by consensus.
+    highest_block_seen: u64,
+
+    /// As we process blocks with ascending eras, we track the validators for those eras.
+    current_era_validators: Option<BTreeMap<PublicKey, U512>>,
 }
 
-#[allow(dead_code)]
-impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
+impl<I> LinearChainFastSync<I> {
     pub fn new<Err>(
         registry: &Registry,
-        _chainspec: &Chainspec,
-        _storage: &Storage,
-        init_hash: Option<BlockHash>,
+        trusted_hash: Option<BlockHash>,
         genesis_validator_weights: BTreeMap<PublicKey, U512>,
-        _next_upgrade_activation_point: Option<ActivationPoint>,
+        rng: NodeRng,
     ) -> Result<Self, Err>
     where
         Err: From<prometheus::Error> + From<storage::Error>,
     {
-        let state = init_hash.map_or(State::None, |init_hash| {
-            State::sync_trusted_hash(init_hash, genesis_validator_weights)
-        });
+        let phase = State::sync_trusted_hash(genesis_validator_weights.clone());
         Ok(LinearChainFastSync {
-            peers: PeersState::new(),
-            state,
+            trusted_hash,
+            peer_pool_mutex: Arc::new(Mutex::new(PeerPool::new(rng))),
+            /////////////
             metrics: LinearChainSyncMetrics::new(registry)?,
+            state: phase,
+            trusted_header: None,
+            initial_peer_id: None,
+            old_peers: OldPeers::new(),
+            highest_block_seen: 0,
+            genesis_validator_weights,
+            current_era_validators: None,
         })
-    }
-
-    /// Add new block to linear chain.
-    fn add_block(&mut self, block: Block) {
-        match &mut self.state {
-            State::None | State::Done => {}
-            State::SyncingTrustedHash { linear_chain, .. } => linear_chain.push(block),
-            State::SyncingDescendants { latest_block, .. } => **latest_block = block,
-        };
     }
 
     /// Returns `true` if we have finished syncing linear chain.
     pub fn is_synced(&self) -> bool {
-        matches!(self.state, State::None | State::Done)
+        self.trusted_hash.is_none() || matches!(self.state, State::None)
     }
 
-    /// Fast sync won't shut down for an upgrade.
-    pub fn stopped_for_upgrade(&self) -> bool {
-        false
+    /// Mark the process as finished syncing
+    fn mark_as_done(&mut self) {
+        // If there is no trusted hash, syncing is done (or never started)
+        self.trusted_hash = None;
+    }
+
+    /////////////////////
+
+    // TODO: move initial peer into peers object
+    fn ban_peer(&mut self, initial_peer_id: I, peer: &I) -> I
+    where
+        I: PartialEq + Clone,
+    {
+        self.old_peers.ban(peer);
+        if peer == &initial_peer_id {
+            match self.old_peers.get_peer() {
+                None => {
+                    panic!("All peers have been banned, cannot continue joining.")
+                }
+                Some(peer) => {
+                    self.initial_peer_id = Some(peer.clone());
+                    peer
+                }
+            }
+        } else {
+            initial_peer_id
+        }
+    }
+
+    /// Extracts a `Box<Block>` from a [BlockByHashResult].
+    /// Creates retry [Effects] to try to get it again if it was not found.
+    pub fn extract_block_by_hash_result<'a, REv>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        rng: &mut NodeRng,
+        initial_peer_id: I,
+        block_hash: BlockHash,
+        block_by_hash_result: &'a BlockByHashResult<I>,
+    ) -> FoundOrRetry<&'a Box<Block>, Effects<Event<I>>>
+    where
+        REv: From<FetcherRequest<I, Block>> + Send,
+        I: Clone + Display + PartialEq + Send + 'static,
+    {
+        match block_by_hash_result {
+            BlockByHashResult::Absent(peer) => {
+                self.metrics.observe_get_block_by_hash();
+                trace!(%block_hash, %peer, "failed to download block by hash. Trying next peer");
+                self.old_peers.mark_peer_did_not_have_data(peer);
+                FoundOrRetry::Retry(self.fetch_block_by_hash(
+                    effect_builder,
+                    rng,
+                    initial_peer_id,
+                    block_hash,
+                ))
+            }
+            BlockByHashResult::FetchResult(FetchResult::FromStorage(block)) => {
+                // We shouldn't get invalid data from the storage.
+                // If we do, it's a bug.
+                assert_eq!(*block.hash(), block_hash, "Block hash mismatch.");
+                assert_eq!(
+                    block.header().hash(),
+                    block_hash,
+                    "Hash of header mismatch."
+                );
+                assert_eq!(
+                    block.body().hash(),
+                    *block.header().body_hash(),
+                    "Hash of body mismatch."
+                );
+                trace!(%block_hash, "linear block found in the local storage.");
+                FoundOrRetry::Found(block)
+            }
+            BlockByHashResult::FetchResult(FetchResult::FromPeer(block, peer)) => {
+                self.metrics.observe_get_block_by_hash();
+                trace!(%block_hash, %peer, "block downloaded from a peer using hash");
+
+                // Check the cryptographic hash of the header.
+                // It must match the hash requested and the stated block header.
+                // Body hash must also match body hash in header.
+                // If not, ban the peer and request the block hash from another peer.
+                let actual_block_hash = block.header().hash();
+                let actual_body_hash = block.body().hash();
+                if actual_block_hash != block_hash
+                    || actual_block_hash != *block.hash()
+                    || actual_body_hash != *block.header().body_hash()
+                {
+                    warn!(
+                        "Block is cryptographically invalid.\n\
+                         \n\
+                         Expected block hash: {},\n\
+                         What block reports its hash is: {}\n\
+                         Actual hash of block header: {}.\n\
+                         \n\
+                         What header expects hash of block body to be: {}\n\
+                         Actual block body hash: {}\n\
+                         \n\
+                         Disconnecting from peer: {}",
+                        block_hash,
+                        block.hash(),
+                        actual_block_hash,
+                        block.header().body_hash(),
+                        actual_body_hash,
+                        peer
+                    );
+                    // NOTE: Signal misbehaving validator to pool of peers.
+                    let initial_peer_id = self.ban_peer(initial_peer_id, peer);
+                    FoundOrRetry::Retry(self.fetch_block_by_hash(
+                        effect_builder,
+                        rng,
+                        initial_peer_id,
+                        block_hash,
+                    ))
+                } else {
+                    self.old_peers.mark_peer_as_had_success_with(peer.clone());
+                    FoundOrRetry::Found(block)
+                }
+            }
+        }
     }
 
     fn block_downloaded<REv>(
         &mut self,
-        rng: &mut NodeRng,
         effect_builder: EffectBuilder<REv>,
-        block: &Block,
+        rng: &mut NodeRng,
+        initial_peer_id: I,
+        block: &Box<Block>,
     ) -> Effects<Event<I>>
     where
-        I: Send + 'static,
-        REv: ReactorEventT<I>,
+        REv: From<FetcherRequest<I, Block>> + From<BlockValidationRequest<Block, I>> + Send,
+        I: Clone + Send + 'static,
     {
-        self.peers.reset(rng);
-        self.state.block_downloaded(block.header());
-        self.add_block(block.clone());
+        self.old_peers.reset_peers_to_try(rng);
+
+        if block.height() > self.highest_block_seen {
+            self.highest_block_seen = block.height();
+        }
+
         match &mut self.state {
-            State::None | State::Done => panic!("Downloaded block when in {} state.", self.state),
-            State::SyncingTrustedHash {
-                trusted_hash,
-                trusted_header,
-                ..
-            } => {
-                if *block.hash() == *trusted_hash {
-                    *trusted_header = Some(Box::new(block.header().clone()));
-                }
+            State::None => unreachable!("State::None should never handle a block downloaded"),
+
+            State::SyncingTrustedHash { linear_chain, .. } => {
+                linear_chain.push(*block.clone());
+
                 if block.header().is_genesis_child() {
                     info!("linear chain downloaded. Start downloading deploys.");
                     effect_builder
                         .immediately()
                         .event(move |_| Event::StartDownloadingDeploys)
                 } else {
-                    self.fetch_next_block(effect_builder, rng, block.header())
+                    self.fetch_block_by_hash(
+                        effect_builder,
+                        rng,
+                        initial_peer_id,
+                        *block.header().parent_hash(),
+                    )
                 }
             }
-            State::SyncingDescendants { .. } => {
+            State::SyncingDescendants {
+                ref mut latest_block,
+                ..
+            } => {
+                *latest_block = block.clone();
                 // When synchronizing descendants, we want to download block and execute it
                 // before trying to download the next block in linear chain.
                 self.fetch_next_block_deploys(effect_builder)
@@ -124,48 +381,40 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
         }
     }
 
-    fn mark_done(&mut self) {
-        self.state = State::Done;
-    }
-
     /// Handles an event indicating that a linear chain block has been executed and handled by
     /// consensus component. This is a signal that we can safely continue with the next blocks,
     /// without worrying about timing and/or ordering issues.
     /// Returns effects that are created as a response to that event.
-    fn block_handled<REv>(
+    fn handle_block_processed_by_linear_chain<REv>(
         &mut self,
-        rng: &mut NodeRng,
         effect_builder: EffectBuilder<REv>,
+        rng: &mut NodeRng,
+        initial_peer_id: I,
         block: Block,
     ) -> Effects<Event<I>>
     where
-        I: Send + 'static,
-        REv: ReactorEventT<I>,
+        REv: From<FetcherRequest<I, Block>>
+            + From<BlockValidationRequest<Block, I>>
+            + From<FetcherRequest<I, BlockByHeight>>
+            + Send,
+        I: Send + Clone + 'static,
     {
-        let height = block.height();
         let hash = block.hash();
-        trace!(%hash, %height, "Downloaded linear chain block.");
-        // Reset peers before creating new requests.
-        self.peers.reset(rng);
         let block_height = block.height();
+        trace!(%hash, %block_height, "Downloaded linear chain block.");
+
+        // Reset peers before creating new requests.
+        self.old_peers.reset_peers_to_try(rng);
         let mut curr_state = mem::replace(&mut self.state, State::None);
         match curr_state {
-            State::None | State::Done => panic!("Block handled when in {:?} state.", &curr_state),
-            State::SyncingTrustedHash {
-                highest_block_seen,
-                trusted_header: None,
-                ..
-            } if highest_block_seen == block_height => panic!("Should always have trusted header"),
+            State::None => panic!("Block handled when in {:?} state.", &curr_state),
             // If the block we are handling is the highest block seen, transition to syncing
             // descendants
             State::SyncingTrustedHash {
-                highest_block_seen,
-                trusted_hash,
-                trusted_header,
                 ref latest_block,
                 validator_weights,
                 ..
-            } if highest_block_seen == block_height => {
+            } if self.highest_block_seen == block_height => {
                 // TODO: Fail gracefully in these cases
                 match latest_block.as_ref() {
                     Some(expected) => assert_eq!(
@@ -174,13 +423,11 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
                     ),
                     None => panic!("Unexpected block execution results."),
                 }
-                let trusted_header = trusted_header.expect("trusted header must be present");
 
                 info!(%block_height, "Finished synchronizing linear chain up until trusted hash.");
-                let peer = self.peers.random_unsafe();
+                let peer = self.old_peers.get_peer_unsafe();
                 // Kick off syncing trusted hash descendants.
-                self.state =
-                    State::sync_descendants(trusted_hash, trusted_header, block, validator_weights);
+                self.state = State::sync_descendants(block, validator_weights);
                 fetch_block_at_height(effect_builder, peer, block_height + 1)
             }
             // Keep syncing from genesis if we haven't reached the trusted block hash
@@ -206,7 +453,7 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
             }
             State::SyncingDescendants {
                 ref latest_block,
-                ref mut validators_for_latest_block,
+                validators_for_next_block: ref mut validators_for_latest_block,
                 ..
             } => {
                 assert_eq!(
@@ -220,7 +467,7 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
                     }
                 }
                 self.state = curr_state;
-                self.fetch_next_block(effect_builder, rng, &block.header())
+                self.fetch_next_block(effect_builder, rng, initial_peer_id, &block.header())
             }
         }
     }
@@ -231,13 +478,13 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
         effect_builder: EffectBuilder<REv>,
     ) -> Effects<Event<I>>
     where
-        I: Send + 'static,
-        REv: ReactorEventT<I>,
+        REv: From<BlockValidationRequest<Block, I>> + Send,
+        I: Clone + Send + 'static,
     {
-        let peer = self.peers.random_unsafe();
+        let peer = self.old_peers.get_peer_unsafe();
 
         let next_block = match &mut self.state {
-            State::None | State::Done => {
+            State::None => {
                 panic!("Tried fetching next block when in {:?} state.", self.state)
             }
             State::SyncingTrustedHash {
@@ -268,31 +515,63 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
         )
     }
 
+    // TODO: Don't get blocks get block headers
+    fn fetch_block_by_hash<REv>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        rng: &mut NodeRng,
+        initial_peer_id: I,
+        block_hash: BlockHash,
+    ) -> Effects<Event<I>>
+    where
+        REv: From<FetcherRequest<I, Block>> + Send,
+        I: Clone + Send + 'static,
+    {
+        self.metrics.reset_start_time();
+        self.old_peers.reset_peers_to_try(rng);
+        let peer = self.old_peers.get_peer().unwrap_or(initial_peer_id);
+        effect_builder
+            .fetch_block(block_hash, peer.clone())
+            .map_or_else(
+                move |fetch_result| {
+                    Event::GetBlockHashResult(
+                        block_hash,
+                        BlockByHashResult::FetchResult(fetch_result),
+                    )
+                },
+                move || Event::GetBlockHashResult(block_hash, BlockByHashResult::Absent(peer)),
+            )
+    }
+
+    // TODO: Delete me
     fn fetch_next_block<REv>(
         &mut self,
         effect_builder: EffectBuilder<REv>,
         rng: &mut NodeRng,
+        initial_peer: I,
         block_header: &BlockHeader,
     ) -> Effects<Event<I>>
     where
-        I: Send + 'static,
-        REv: ReactorEventT<I>,
+        REv: From<FetcherRequest<I, Block>> + From<FetcherRequest<I, BlockByHeight>> + Send,
+        I: Clone + Send + 'static,
     {
-        self.peers.reset(rng);
-        let peer = self.peers.random_unsafe();
         match self.state {
-            State::SyncingTrustedHash { .. } => {
-                let parent_hash = *block_header.parent_hash();
-                self.metrics.reset_start_time();
-                fetch_block_by_hash(effect_builder, peer, parent_hash)
-            }
+            State::SyncingTrustedHash { .. } => self.fetch_block_by_hash(
+                effect_builder,
+                rng,
+                initial_peer,
+                *block_header.parent_hash(),
+            ),
             State::SyncingDescendants { .. } => {
+                self.old_peers.reset_peers_to_try(rng);
+                // Note: load bearing unsafe below, can't switch to `.unwrap_or(initial_peer)`!
+                let peer = self.old_peers.get_peer_unsafe();
                 let next_height = block_header.height() + 1;
                 self.metrics.reset_start_time();
                 fetch_block_at_height(effect_builder, peer, next_height)
             }
-            State::Done | State::None => {
-                panic!("Tried fetching block when in {:?} state", self.state)
+            State::None => {
+                unreachable!("Tried fetching block when in {:?} state", self.state)
             }
         }
     }
@@ -301,15 +580,21 @@ impl<I: Clone + PartialEq + 'static> LinearChainFastSync<I> {
         match &self.state {
             State::SyncingTrustedHash { latest_block, .. } => Option::as_ref(&*latest_block),
             State::SyncingDescendants { latest_block, .. } => Some(&*latest_block),
-            State::Done | State::None => None,
+            State::None => None,
         }
     }
 }
 
 impl<I, REv> Component<REv> for LinearChainFastSync<I>
 where
-    I: Display + Clone + Send + PartialEq + 'static,
-    REv: ReactorEventT<I>,
+    I: Display + Clone + Send + PartialEq + Debug + Eq + std::hash::Hash + 'static,
+    REv: From<FetcherRequest<I, Block>>
+        + From<BlockExecutorRequest>
+        + From<BlockValidationRequest<Block, I>>
+        + From<FetcherRequest<I, BlockByHeight>>
+        + From<FetcherRequest<I, Trie<Key, StoredValue>>>
+        + From<ContractRuntimeRequest>
+        + Send,
 {
     type Event = Event<I>;
     type ConstructionError = Infallible;
@@ -320,42 +605,71 @@ where
         rng: &mut NodeRng,
         event: Self::Event,
     ) -> Effects<Self::Event> {
-        match event {
-            Event::Start(init_peer) => {
-                match self.state {
-                    State::None => {
-                        // No syncing configured.
-                        trace!("received `Start` event when in {} state.", self.state);
-                        Effects::new()
-                    }
-                    State::Done | State::SyncingDescendants { .. } => {
-                        // Illegal states for syncing start.
-                        error!(
-                            "should not have received `Start` event when in {} state.",
-                            self.state
-                        );
-                        Effects::new()
-                    }
-                    State::SyncingTrustedHash { trusted_hash, .. } => {
-                        trace!(?trusted_hash, "start synchronization");
-                        // Start synchronization.
-                        self.metrics.reset_start_time();
-                        fetch_block_by_hash(effect_builder, init_peer, trusted_hash)
-                    }
-                }
+        let trusted_hash = match self.trusted_hash {
+            Some(trusted_hash) => trusted_hash.clone(),
+            // If there is no trusted hash, there is nothing to sync and we don't emit any effects.
+            None => {
+                warn!(%event, "No trusted block hash, joiner dropping event");
+                return Effects::new();
             }
+        };
+
+        match event {
+            Event::NewPeerConnected(peer_id) => {
+                trace!(%peer_id, "new peer connected");
+
+                ////// Legacy Stuff ///////
+                self.old_peers.add_peer(peer_id.clone());
+                if self.initial_peer_id.is_none() {
+                    self.initial_peer_id = Some(peer_id.clone());
+                }
+                //////////////////////////
+
+                let peer_pool_mutex = self.peer_pool_mutex.clone();
+                (async move {
+                    let count = {
+                        let mut peer_pool = peer_pool_mutex.lock().await;
+                        let count = peer_pool.count();
+                        peer_pool.deref_mut().add(peer_id);
+                        count
+                    };
+                    if count == 0 {
+                        // If this is the first peer we've encountered, kick off fast sync process
+                        fast_sync(effect_builder, peer_pool_mutex, trusted_hash).await;
+                        Some(Event::Done)
+                    } else {
+                        // Otherwise don't emit any effects since we've already started syncing
+                        None
+                    }
+                })
+                .into_effects()
+            }
+
+            Event::Done => {
+                debug!("Done syncing");
+                // self.mark_as_done();
+                // Legacy sync for now
+                let initial_peer_id = self.initial_peer_id.as_ref().unwrap().clone();
+                self.fetch_block_by_hash(effect_builder, rng, initial_peer_id, trusted_hash)
+            }
+
+            ///////////////////////////////////////////////////////////
+
+            // Legacy Sync
             Event::GetBlockHeightResult(block_height, fetch_result) => {
                 match fetch_result {
                     BlockByHeightResult::Absent(peer) => {
                         self.metrics.observe_get_block_by_height();
                         trace!(%block_height, %peer, "failed to download block by height. Trying next peer");
-                        self.peers.failure(&peer);
-                        match self.peers.random() {
+                        self.old_peers.mark_peer_did_not_have_data(&peer);
+                        match self.old_peers.get_peer() {
                             None => {
                                 // `block_height` not found on any of the peers.
                                 // We have synchronized all, currently existing, descendants of
                                 // trusted hash.
-                                self.mark_done();
+
+                                // TODO: check stopping condition?
+                                self.mark_as_done();
                                 info!("finished synchronizing descendants of the trusted hash.");
                                 Effects::new()
                             }
@@ -365,21 +679,23 @@ where
                             }
                         }
                     }
-                    BlockByHeightResult::FromStorage(block) => {
+                    BlockByHeightResult::FetchResult(FetchResult::FromStorage(block)) => {
                         // We shouldn't get invalid data from the storage.
                         // If we do, it's a bug.
                         assert_eq!(block.height(), block_height, "Block height mismatch.");
                         trace!(%block_height, "Linear block found in the local storage.");
                         // When syncing descendants of a trusted hash, we might have some of them in
-                        // our local storage. If that's the case, just
-                        // continue.
-                        self.block_downloaded(rng, effect_builder, &*block)
+                        // our local storage. If that's the case, just continue.
+                        let initial_peer_id = self.initial_peer_id.as_ref().unwrap().clone();
+                        self.block_downloaded(effect_builder, rng, initial_peer_id, &block)
                     }
-                    BlockByHeightResult::FromPeer(block, peer) => {
+                    BlockByHeightResult::FetchResult(FetchResult::FromPeer(block, peer)) => {
                         self.metrics.observe_get_block_by_height();
                         trace!(%block_height, %peer, "linear chain block downloaded from a peer");
+                        // TODO: check block body
                         if block.height() != block_height
-                            || *block.header().parent_hash() != *self.latest_block().unwrap().hash()
+                            || *block.header().parent_hash()
+                                != self.latest_block().unwrap().header().hash()
                         {
                             warn!(
                                 %peer,
@@ -390,7 +706,7 @@ where
                                 "block mismatch",
                             );
                             // NOTE: Signal misbehaving validator to networking layer.
-                            self.peers.ban(&peer);
+                            self.old_peers.ban(&peer);
                             return self.handle_event(
                                 effect_builder,
                                 rng,
@@ -400,64 +716,31 @@ where
                                 ),
                             );
                         }
-                        self.peers.success(peer);
-                        self.block_downloaded(rng, effect_builder, &*block)
+                        self.old_peers.mark_peer_as_had_success_with(peer);
+                        let initial_peer_id = self.initial_peer_id.as_ref().unwrap().clone();
+                        self.block_downloaded(effect_builder, rng, initial_peer_id, &block)
                     }
                 }
             }
-            Event::GetBlockHashResult(block_hash, fetch_result) => {
-                match fetch_result {
-                    BlockByHashResult::Absent(peer) => {
-                        self.metrics.observe_get_block_by_hash();
-                        trace!(%block_hash, %peer, "failed to download block by hash. Trying next peer");
-                        self.peers.failure(&peer);
-                        match self.peers.random() {
-                            None => {
-                                error!(%block_hash, "Could not download linear block from any of the peers.");
-                                panic!("Failed to download linear chain.")
-                            }
-                            Some(peer) => {
-                                self.metrics.reset_start_time();
-                                fetch_block_by_hash(effect_builder, peer, block_hash)
-                            }
-                        }
+
+            Event::GetBlockHashResult(block_hash, block_by_hash_result) => {
+                let initial_peer_id = self.initial_peer_id.as_ref().unwrap().clone();
+                let block = match self.extract_block_by_hash_result(
+                    effect_builder,
+                    rng,
+                    initial_peer_id,
+                    block_hash,
+                    &block_by_hash_result,
+                ) {
+                    FoundOrRetry::Found(block) => block,
+                    FoundOrRetry::Retry(effects) => {
+                        return effects;
                     }
-                    BlockByHashResult::FromStorage(block) => {
-                        // We shouldn't get invalid data from the storage.
-                        // If we do, it's a bug.
-                        assert_eq!(*block.hash(), block_hash, "Block hash mismatch.");
-                        trace!(%block_hash, "linear block found in the local storage.");
-                        self.block_downloaded(rng, effect_builder, &*block)
-                    }
-                    BlockByHashResult::FromPeer(block, peer) => {
-                        self.metrics.observe_get_block_by_hash();
-                        trace!(%block_hash, %peer, "linear chain block downloaded from a peer");
-                        let header_hash = block.header().hash();
-                        if header_hash != block_hash || header_hash != *block.hash() {
-                            warn!(
-                                "Block hash mismatch. Expected {} got {} from {}.\
-                                 Block claims to have hash {}. Disconnecting.",
-                                block_hash,
-                                header_hash,
-                                block.hash(),
-                                peer
-                            );
-                            // NOTE: Signal misbehaving validator to networking layer.
-                            self.peers.ban(&peer);
-                            return self.handle_event(
-                                effect_builder,
-                                rng,
-                                Event::GetBlockHashResult(
-                                    block_hash,
-                                    BlockByHashResult::Absent(peer),
-                                ),
-                            );
-                        }
-                        self.peers.success(peer);
-                        self.block_downloaded(rng, effect_builder, &*block)
-                    }
-                }
+                };
+                let initial_peer_id = self.initial_peer_id.as_ref().unwrap().clone();
+                self.block_downloaded(effect_builder, rng, initial_peer_id, block)
             }
+
             Event::GetDeploysResult(fetch_result) => {
                 self.metrics.observe_get_deploys();
                 match fetch_result {
@@ -465,7 +748,7 @@ where
                         let block_hash = block.hash();
                         trace!(%block_hash, "deploys for linear chain block found");
                         // Reset used peers so we can download next block with the full set.
-                        self.peers.reset(rng);
+                        self.old_peers.reset_peers_to_try(rng);
                         // Execute block
                         let finalized_block: FinalizedBlock = (*block).into();
                         effect_builder.execute_block(finalized_block).ignore()
@@ -473,8 +756,8 @@ where
                     event::DeploysResult::NotFound(block, peer) => {
                         let block_hash = block.hash();
                         trace!(%block_hash, %peer, "deploy for linear chain block not found. Trying next peer");
-                        self.peers.failure(&peer);
-                        match self.peers.random() {
+                        self.old_peers.mark_peer_did_not_have_data(&peer);
+                        match self.old_peers.get_peer() {
                             None => {
                                 error!(%block_hash,
                                 "could not download deploys from linear chain block.");
@@ -490,50 +773,34 @@ where
             }
             Event::StartDownloadingDeploys => {
                 // Start downloading deploys from the first block of the linear chain.
-                self.peers.reset(rng);
+                self.old_peers.reset_peers_to_try(rng);
                 self.fetch_next_block_deploys(effect_builder)
-            }
-            Event::NewPeerConnected(peer_id) => {
-                trace!(%peer_id, "new peer connected");
-                // Add to the set of peers we can request things from.
-                let mut effects = Effects::new();
-                if self.peers.is_empty() {
-                    // First peer connected, start downloading.
-                    let cloned_peer_id = peer_id.clone();
-                    effects.extend(
-                        effect_builder
-                            .immediately()
-                            .event(move |_| Event::Start(cloned_peer_id)),
-                    );
-                }
-                self.peers.push(peer_id);
-                effects
             }
             Event::BlockHandled(block) => {
                 let block_height = block.height();
                 let block_hash = *block.hash();
-                let effects = self.block_handled(rng, effect_builder, *block);
+                let initial_peer_id = self.initial_peer_id.as_ref().unwrap().clone();
+                let effects = self.handle_block_processed_by_linear_chain(
+                    effect_builder,
+                    rng,
+                    initial_peer_id,
+                    *block,
+                );
                 trace!(%block_height, %block_hash, "block handled");
                 effects
-            }
-            Event::GotUpgradeActivationPoint(next_upgrade_activation_point) => {
-                debug!(
-                    ?next_upgrade_activation_point,
-                    "new activation point ignored"
-                );
-                Effects::new()
             }
         }
     }
 }
 
-fn fetch_block_deploys<I: Clone + Send + 'static, REv>(
+fn fetch_block_deploys<I, REv>(
     effect_builder: EffectBuilder<REv>,
     peer: I,
     block: Block,
 ) -> Effects<Event<I>>
 where
-    REv: ReactorEventT<I>,
+    I: Clone + Send + 'static,
+    REv: From<BlockValidationRequest<Block, I>> + Send,
 {
     let block_timestamp = block.header().timestamp();
     effect_builder
@@ -547,66 +814,45 @@ where
         })
 }
 
-fn fetch_block_by_hash<I: Clone + Send + 'static, REv>(
-    effect_builder: EffectBuilder<REv>,
-    peer: I,
-    block_hash: BlockHash,
-) -> Effects<Event<I>>
-where
-    REv: ReactorEventT<I>,
-{
-    let cloned = peer.clone();
-    effect_builder.fetch_block(block_hash, peer).map_or_else(
-        move |fetch_result| match fetch_result {
-            FetchResult::FromStorage(block) => {
-                Event::GetBlockHashResult(block_hash, BlockByHashResult::FromStorage(block))
-            }
-            FetchResult::FromPeer(block, peer) => {
-                Event::GetBlockHashResult(block_hash, BlockByHashResult::FromPeer(block, peer))
-            }
-        },
-        move || Event::GetBlockHashResult(block_hash, BlockByHashResult::Absent(cloned)),
-    )
-}
-
-fn fetch_block_at_height<I: Send + Clone + 'static, REv>(
+fn fetch_block_at_height<I, REv>(
     effect_builder: EffectBuilder<REv>,
     peer: I,
     block_height: u64,
 ) -> Effects<Event<I>>
 where
-    REv: ReactorEventT<I>,
+    I: Send + Clone + 'static,
+    REv: From<FetcherRequest<I, BlockByHeight>> + Send,
 {
-    let cloned = peer.clone();
     effect_builder
         .fetch_block_by_height(block_height, peer.clone())
         .map_or_else(
-            move |fetch_result| match fetch_result {
-                FetchResult::FromPeer(result, _) => match *result {
-                    BlockByHeight::Absent(ret_height) => {
-                        warn!(
-                            "Fetcher returned result for invalid height. Expected {}, got {}",
-                            block_height, ret_height
-                        );
-                        Event::GetBlockHeightResult(block_height, BlockByHeightResult::Absent(peer))
-                    }
-                    BlockByHeight::Block(block) => Event::GetBlockHeightResult(
-                        block_height,
-                        BlockByHeightResult::FromPeer(block, peer),
-                    ),
-                },
-                FetchResult::FromStorage(result) => match *result {
-                    BlockByHeight::Absent(_) => {
-                        // Fetcher should try downloading the block from a peer
-                        // when it can't find it in the storage.
-                        panic!("Should not return `Absent` in `FromStorage`.")
-                    }
-                    BlockByHeight::Block(block) => Event::GetBlockHeightResult(
-                        block_height,
-                        BlockByHeightResult::FromStorage(block),
-                    ),
-                },
+            move |fetch_result| {
+                let block_by_height_result = match fetch_result {
+                    FetchResult::FromPeer(result, peer) => match *result {
+                        BlockByHeight::Absent(ret_height) => {
+                            warn!(
+                                "Fetcher returned result for invalid height. Expected {}, got {}",
+                                block_height, ret_height
+                            );
+                            BlockByHeightResult::Absent(peer)
+                        }
+                        BlockByHeight::Block(block) => {
+                            BlockByHeightResult::FetchResult(FetchResult::FromPeer(block, peer))
+                        }
+                    },
+                    FetchResult::FromStorage(result) => match *result {
+                        BlockByHeight::Absent(_) => {
+                            // Fetcher should try downloading the block from a peer
+                            // when it can't find it in the storage.
+                            panic!("Should not return `Absent` in `FromStorage`.")
+                        }
+                        BlockByHeight::Block(block) => {
+                            BlockByHeightResult::FetchResult(FetchResult::FromStorage(block))
+                        }
+                    },
+                };
+                Event::GetBlockHeightResult(block_height, block_by_height_result)
             },
-            move || Event::GetBlockHeightResult(block_height, BlockByHeightResult::Absent(cloned)),
+            move || Event::GetBlockHeightResult(block_height, BlockByHeightResult::Absent(peer)),
         )
 }
