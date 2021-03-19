@@ -6,12 +6,12 @@ use crate::{
             StorageRequest,
         },
     },
-    types::{Block, BlockByHeight},
+    types::{Block, BlockHeaderAndMetadata},
 };
 pub trait ReactorEventT<I>:
     From<StorageRequest>
     + From<FetcherRequest<I, Block>>
-    + From<FetcherRequest<I, BlockByHeight>>
+    + From<FetcherRequest<I, BlockHeaderAndMetadata>>
     + From<BlockValidationRequest<Block, I>>
     + From<BlockExecutorRequest>
     + From<StateStoreRequest>
@@ -23,7 +23,7 @@ pub trait ReactorEventT<I>:
 impl<I, REv> ReactorEventT<I> for REv where
     REv: From<StorageRequest>
         + From<FetcherRequest<I, Block>>
-        + From<FetcherRequest<I, BlockByHeight>>
+        + From<FetcherRequest<I, BlockHeaderAndMetadata>>
         + From<BlockValidationRequest<Block, I>>
         + From<BlockExecutorRequest>
         + From<StateStoreRequest>

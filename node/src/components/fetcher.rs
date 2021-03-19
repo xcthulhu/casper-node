@@ -10,7 +10,11 @@ use prometheus::Registry;
 use smallvec::smallvec;
 use tracing::{debug, error, info};
 
-use casper_execution_engine::shared::newtypes::Blake2bHash;
+use casper_execution_engine::{
+    shared::{newtypes::Blake2bHash, stored_value::StoredValue},
+    storage::trie::Trie,
+};
+use casper_types::Key;
 
 use crate::{
     components::{fetcher::event::FetchResponder, Component},
@@ -19,13 +23,12 @@ use crate::{
         EffectBuilder, EffectExt, Effects,
     },
     protocol::Message,
-    types::{Block, BlockByHeight, BlockHash, Deploy, DeployHash, Item, NodeId},
+    types::{Block, BlockByHeight, BlockHash, BlockHeader, Deploy, DeployHash, Item, NodeId},
     utils::Source,
     NodeRng,
 };
 
-use casper_execution_engine::{shared::stored_value::StoredValue, storage::trie::Trie};
-use casper_types::Key;
+use crate::types::BlockHeaderAndMetadata;
 pub use config::Config;
 pub use event::{Event, FetchResult};
 use metrics::FetcherMetrics;
@@ -275,6 +278,33 @@ impl ItemFetcher<BlockByHeight> for Fetcher<BlockByHeight> {
     }
 }
 
+impl ItemFetcher<BlockHeaderAndMetadata> for Fetcher<BlockHeaderAndMetadata> {
+    fn responders(
+        &mut self,
+    ) -> &mut HashMap<u64, HashMap<NodeId, Vec<FetchResponder<BlockHeaderAndMetadata>>>> {
+        &mut self.responders
+    }
+
+    fn peer_timeout(&self) -> Duration {
+        self.get_from_peer_timeout
+    }
+
+    fn get_from_storage<REv: ReactorEventT<BlockHeaderAndMetadata>>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        id: u64,
+        peer: NodeId,
+    ) -> Effects<Event<BlockHeaderAndMetadata>> {
+        effect_builder
+            .get_block_and_metadata_at_height_from_storage(id)
+            .event(move |result| Event::GetFromStorageResult {
+                id,
+                peer,
+                maybe_item: Box::new(result),
+            })
+    }
+}
+
 type GlobalStorageTrie = Trie<Key, StoredValue>;
 
 impl ItemFetcher<GlobalStorageTrie> for Fetcher<GlobalStorageTrie> {
@@ -300,6 +330,33 @@ impl ItemFetcher<GlobalStorageTrie> for Fetcher<GlobalStorageTrie> {
                 id,
                 peer,
                 maybe_item: Box::new(maybe_trie),
+            })
+    }
+}
+
+impl ItemFetcher<BlockHeader> for Fetcher<BlockHeader> {
+    fn responders(
+        &mut self,
+    ) -> &mut HashMap<BlockHash, HashMap<NodeId, Vec<FetchResponder<BlockHeader>>>> {
+        &mut self.responders
+    }
+
+    fn peer_timeout(&self) -> Duration {
+        self.get_from_peer_timeout
+    }
+
+    fn get_from_storage<REv: ReactorEventT<BlockHeader>>(
+        &mut self,
+        effect_builder: EffectBuilder<REv>,
+        id: BlockHash,
+        peer: NodeId,
+    ) -> Effects<Event<BlockHeader>> {
+        effect_builder
+            .get_block_header_from_storage(id)
+            .event(move |maybe_block_header| Event::GetFromStorageResult {
+                id,
+                peer,
+                maybe_item: Box::new(maybe_block_header),
             })
     }
 }

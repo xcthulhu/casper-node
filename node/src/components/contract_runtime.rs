@@ -25,14 +25,17 @@ use casper_execution_engine::{
         genesis::GenesisResult, EngineConfig, EngineState, Error, GetEraValidatorsError,
         GetEraValidatorsRequest,
     },
-    shared::newtypes::{Blake2bHash, CorrelationId},
+    shared::{
+        newtypes::{Blake2bHash, CorrelationId},
+        stored_value::StoredValue,
+    },
     storage::{
         error::lmdb::Error as StorageLmdbError, global_state::lmdb::LmdbGlobalState,
         protocol_data_store::lmdb::LmdbProtocolDataStore,
-        transaction_source::lmdb::LmdbEnvironment, trie_store::lmdb::LmdbTrieStore,
+        transaction_source::lmdb::LmdbEnvironment, trie::Trie, trie_store::lmdb::LmdbTrieStore,
     },
 };
-use casper_types::{system::auction::ValidatorWeights, ProtocolVersion};
+use casper_types::{system::auction::ValidatorWeights, Key, ProtocolVersion};
 
 use crate::{
     components::Component,
@@ -627,6 +630,15 @@ impl ContractRuntime {
             protocol_version,
             &ee_config,
         )
+    }
+
+    /// Reads a `Trie` from the state if it is present
+    pub fn read_trie(
+        &self,
+        trie_key: Blake2bHash,
+    ) -> Result<Option<Trie<Key, StoredValue>>, Error> {
+        let correlation_id = CorrelationId::new();
+        self.engine_state.read_trie(correlation_id, trie_key)
     }
 
     /// Retrieve trie keys for the integrity check.

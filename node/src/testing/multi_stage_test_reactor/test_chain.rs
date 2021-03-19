@@ -119,7 +119,7 @@ impl TestChain {
         chainspec.protocol_config.activation_point =
             ActivationPoint::Genesis(Timestamp::now() + 45000.into());
 
-        chainspec.core_config.minimum_era_height = 4;
+        chainspec.core_config.minimum_era_height = 1;
         chainspec.highway_config.finality_threshold_fraction = Ratio::new(34, 100);
         chainspec.core_config.era_duration = 10.into();
         chainspec.core_config.auction_delay = 1;
@@ -310,7 +310,6 @@ async fn get_switch_block_hash(
 }
 
 /// Test a node joining to a single node network
-#[ignore]
 #[tokio::test]
 async fn test_joiner() {
     testing::init_logging();

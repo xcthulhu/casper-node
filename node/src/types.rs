@@ -4,7 +4,7 @@ mod block;
 pub mod chainspec;
 mod deploy;
 mod exit_code;
-mod item;
+pub(crate) mod item;
 pub mod json_compatibility;
 mod node_config;
 mod node_id;
@@ -21,7 +21,7 @@ pub use block::{
     BlockValidationError, FinalitySignature,
 };
 pub(crate) use block::{
-    BlockByHeight, BlockHeaderWithMetadata, BlockLike, FinalizedBlock, ProtoBlock,
+    BlockByHeight, BlockHeaderAndMetadata, BlockLike, FinalizedBlock, ProtoBlock,
 };
 pub(crate) use chainspec::ActivationPoint;
 pub use chainspec::Chainspec;

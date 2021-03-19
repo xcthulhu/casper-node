@@ -50,9 +50,9 @@ use crate::{
     crypto::hash::Digest,
     rpcs::chain::BlockIdentifier,
     types::{
-        Block as LinearBlock, Block, BlockHash, BlockHeader, BlockSignatures, Chainspec,
-        ChainspecInfo, Deploy, DeployHash, DeployHeader, DeployMetadata, FinalizedBlock, Item,
-        NodeId, ProtoBlock, StatusFeed, TimeDiff, Timestamp,
+        Block as LinearBlock, Block, BlockHash, BlockHeader, BlockHeaderAndMetadata,
+        BlockSignatures, Chainspec, ChainspecInfo, Deploy, DeployHash, DeployHeader,
+        DeployMetadata, FinalizedBlock, Item, NodeId, ProtoBlock, StatusFeed, TimeDiff, Timestamp,
     },
     utils::DisplayIter,
 };
@@ -253,6 +253,14 @@ pub enum StorageRequest {
         /// local storage.
         responder: Responder<Option<BlockHeader>>,
     },
+    /// Retrieve block header with metadata by height.
+    GetBlockHeaderAndMetadataByHeight {
+        /// Hash of block to get header of.
+        block_height: u64,
+        /// Responder to call with the result.  Returns `None` is the block header doesn't exist in
+        /// local storage.
+        responder: Responder<Option<BlockHeaderAndMetadata>>,
+    },
     /// Retrieve all transfers in a block with given hash.
     GetBlockTransfers {
         /// Hash of block to get transfers of.
@@ -403,6 +411,13 @@ impl Display for StorageRequest {
             }
             StorageRequest::PutBlockSignatures { .. } => {
                 write!(formatter, "put finality signatures")
+            }
+            StorageRequest::GetBlockHeaderAndMetadataByHeight { block_height, .. } => {
+                write!(
+                    formatter,
+                    "get block and metadata for block by height: {}",
+                    block_height
+                )
             }
         }
     }
