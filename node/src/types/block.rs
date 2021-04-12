@@ -978,7 +978,7 @@ impl From<bytesrepr::Error> for BlockValidationError {
 }
 
 /// A storage representation of finality signatures with the associated block hash.
-#[derive(Clone, Debug, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize, DataSize, PartialEq)]
+#[derive(Clone, Debug, PartialOrd, Ord, Hash, Serialize, Deserialize, DataSize, Eq, PartialEq)]
 pub struct BlockSignatures {
     /// The block hash for a given block.
     pub(crate) block_hash: BlockHash,
