@@ -201,7 +201,7 @@ impl RpcCall {
         let session = ExecutableDeployItem::Transfer {
             args: transfer_args,
         };
-        let deploy = Deploy::with_payment_and_session(deploy_params, payment, session).unwrap();
+        let deploy = Deploy::with_payment_and_session(deploy_params, payment, session)?;
         let params = PutDeployParams { deploy };
         Transfer::request_with_map_params(self, params)
     }
