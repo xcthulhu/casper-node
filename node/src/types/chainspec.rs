@@ -78,7 +78,15 @@ impl Chainspec {
             && self.core_config.era_duration.millis()
                 < self.core_config.minimum_era_height * min_era_ms
         {
-            warn!("era duration is less than minimum era height * round length!");
+            warn!(
+                "era duration is less than minimum era height * round length! \
+                 era duration ms: {:?} \
+                 minimum era height: {:?} \
+                 minimum era ms: {:?}",
+                self.core_config.era_duration.millis(),
+                self.core_config.minimum_era_height,
+                min_era_ms
+            );
         }
 
         self.highway_config.validate_config();
@@ -269,6 +277,7 @@ mod tests {
             remove_contract_user_group_urefs: HostFunction::new(131, [0, 1, 2, 3, 4, 5]),
             print: HostFunction::new(123, [0, 1]),
             blake2b: HostFunction::new(133, [0, 1, 2, 3]),
+            delete: HostFunction::new(140, [0, 1]),
         });
     static EXPECTED_GENESIS_WASM_COSTS: Lazy<WasmConfig> = Lazy::new(|| {
         WasmConfig::new(
@@ -329,6 +338,7 @@ mod tests {
                     Motes::new(U512::from((index as u64 + 1) * 10))
                 );
             }
+            assert!(spec.protocol_config.last_emergency_restart.is_none());
         } else {
             assert_eq!(
                 spec.protocol_config.version,
@@ -343,6 +353,10 @@ mod tests {
             for value in spec.protocol_config.global_state_update.unwrap().0.values() {
                 assert!(StoredValue::from_bytes(value).is_ok());
             }
+            assert_eq!(
+                spec.protocol_config.last_emergency_restart,
+                Some(EraId::new(99))
+            );
         }
 
         assert_eq!(spec.network_config.name, "test-chain");

@@ -62,7 +62,7 @@ use crate::{
     },
     protocol::Message,
     reactor::{self, event_queue_metrics::EventQueueMetrics, EventQueueHandle, ReactorExit},
-    types::{Block, BlockHash, Deploy, DeployHash, ExitCode, NodeId, ProtoBlock, Tag},
+    types::{Block, BlockHash, Deploy, DeployHash, ExitCode, NodeId, Tag},
     utils::{Source, WithDir},
     NodeRng,
 };
@@ -120,7 +120,7 @@ pub enum Event {
     ContractRuntime(#[serde(skip_serializing)] contract_runtime::Event),
     /// Block validator event.
     #[from]
-    ProtoBlockValidator(#[serde(skip_serializing)] block_validator::Event<ProtoBlock, NodeId>),
+    BlockValidator(#[serde(skip_serializing)] block_validator::Event<NodeId>),
     /// Linear chain event.
     #[from]
     LinearChain(#[serde(skip_serializing)] linear_chain::Event<NodeId>),
@@ -140,9 +140,7 @@ pub enum Event {
     BlockProposerRequest(#[serde(skip_serializing)] BlockProposerRequest),
     /// Block validator request.
     #[from]
-    ProtoBlockValidatorRequest(
-        #[serde(skip_serializing)] BlockValidationRequest<ProtoBlock, NodeId>,
-    ),
+    BlockValidatorRequest(#[serde(skip_serializing)] BlockValidationRequest<NodeId>),
     /// Metrics request.
     #[from]
     MetricsRequest(#[serde(skip_serializing)] MetricsRequest),
@@ -268,7 +266,7 @@ impl Display for Event {
             Event::AddressGossiper(event) => write!(f, "address gossiper: {}", event),
             Event::ContractRuntime(event) => write!(f, "contract runtime: {:?}", event),
             Event::LinearChain(event) => write!(f, "linear-chain event {}", event),
-            Event::ProtoBlockValidator(event) => write!(f, "block validator: {}", event),
+            Event::BlockValidator(event) => write!(f, "block validator: {}", event),
             Event::NetworkRequest(req) => write!(f, "network request: {}", req),
             Event::NetworkInfoRequest(req) => write!(f, "network info request: {}", req),
             Event::ChainspecLoaderRequest(req) => write!(f, "chainspec loader request: {}", req),
@@ -276,7 +274,9 @@ impl Display for Event {
             Event::StateStoreRequest(req) => write!(f, "state store request: {}", req),
             Event::DeployFetcherRequest(req) => write!(f, "deploy fetcher request: {}", req),
             Event::BlockProposerRequest(req) => write!(f, "block proposer request: {}", req),
-            Event::ProtoBlockValidatorRequest(req) => write!(f, "block validator request: {}", req),
+            Event::BlockValidatorRequest(req) => {
+                write!(f, "block validator request: {}", req)
+            }
             Event::MetricsRequest(req) => write!(f, "metrics request: {}", req),
             Event::ControlAnnouncement(ctrl_ann) => write!(f, "control: {}", ctrl_ann),
             Event::NetworkAnnouncement(ann) => write!(f, "network announcement: {}", ann),
@@ -351,7 +351,7 @@ pub struct Reactor {
     deploy_fetcher: Fetcher<Deploy>,
     deploy_gossiper: Gossiper<Deploy, Event>,
     block_proposer: BlockProposer,
-    proto_block_validator: BlockValidator<ProtoBlock, NodeId>,
+    block_validator: BlockValidator<NodeId>,
     linear_chain: LinearChainComponent<NodeId>,
 
     // Non-components.
@@ -486,7 +486,7 @@ impl reactor::Reactor for Reactor {
         );
         contract_runtime.set_parent_map_from_block(latest_block);
 
-        let proto_block_validator = BlockValidator::new(Arc::clone(&chainspec_loader.chainspec()));
+        let block_validator = BlockValidator::new(Arc::clone(&chainspec_loader.chainspec()));
         let linear_chain = linear_chain::LinearChainComponent::new(
             &registry,
             *protocol_version,
@@ -521,7 +521,7 @@ impl reactor::Reactor for Reactor {
                 deploy_fetcher,
                 deploy_gossiper,
                 block_proposer,
-                proto_block_validator,
+                block_validator,
                 linear_chain,
                 memory_metrics,
                 event_queue_metrics,
@@ -599,9 +599,9 @@ impl reactor::Reactor for Reactor {
                 self.contract_runtime
                     .handle_event(effect_builder, rng, event),
             ),
-            Event::ProtoBlockValidator(event) => reactor::wrap_effects(
-                Event::ProtoBlockValidator,
-                self.proto_block_validator
+            Event::BlockValidator(event) => reactor::wrap_effects(
+                Event::BlockValidator,
+                self.block_validator
                     .handle_event(effect_builder, rng, event),
             ),
             Event::LinearChain(event) => reactor::wrap_effects(
@@ -632,10 +632,10 @@ impl reactor::Reactor for Reactor {
             Event::BlockProposerRequest(req) => {
                 self.dispatch_event(effect_builder, rng, Event::BlockProposer(req.into()))
             }
-            Event::ProtoBlockValidatorRequest(req) => self.dispatch_event(
+            Event::BlockValidatorRequest(req) => self.dispatch_event(
                 effect_builder,
                 rng,
-                Event::ProtoBlockValidator(block_validator::Event::from(req)),
+                Event::BlockValidator(block_validator::Event::from(req)),
             ),
             Event::MetricsRequest(req) => reactor::wrap_effects(
                 Event::MetricsRequest,

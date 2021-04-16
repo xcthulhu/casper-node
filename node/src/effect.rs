@@ -99,8 +99,8 @@ use casper_types::{
 
 use crate::{
     components::{
+        block_validator::ValidatingBlock,
         chainspec_loader::{CurrentRunInfo, NextUpgrade},
-        consensus::BlockContext,
         contract_runtime::EraValidatorsRequest,
         deploy_acceptor,
         fetcher::FetchResult,
@@ -109,9 +109,9 @@ use crate::{
     crypto::hash::Digest,
     reactor::{EventQueueHandle, QueueKind},
     types::{
-        Block, BlockAndMetadata, BlockHash, BlockHeader, BlockHeaderAndMetadata, BlockSignatures,
-        Chainspec, ChainspecInfo, Deploy, DeployHash, DeployHeader, DeployMetadata,
-        FinalitySignature, FinalizedBlock, Item, ProtoBlock, TimeDiff, Timestamp,
+        Block, BlockAndMetadata, BlockHash, BlockHeader, BlockHeaderAndMetadata, BlockPayload,
+        BlockSignatures, Chainspec, ChainspecInfo, Deploy, DeployHash, DeployHeader,
+        DeployMetadata, FinalitySignature, FinalizedBlock, Item, TimeDiff, Timestamp,
     },
     utils::Source,
 };
@@ -121,9 +121,9 @@ use announcements::{
     NetworkAnnouncement, RpcServerAnnouncement,
 };
 use requests::{
-    BlockProposerRequest, BlockValidationRequest, ChainspecLoaderRequest, ConsensusRequest,
-    ContractRuntimeRequest, FetcherRequest, MetricsRequest, NetworkInfoRequest, NetworkRequest,
-    ProtoBlockRequest, StateStoreRequest, StorageRequest,
+    BlockPayloadRequest, BlockProposerRequest, BlockValidationRequest, ChainspecLoaderRequest,
+    ConsensusRequest, ContractRuntimeRequest, FetcherRequest, MetricsRequest, NetworkInfoRequest,
+    NetworkRequest, StateStoreRequest, StorageRequest,
 };
 
 use self::announcements::BlocklistAnnouncement;
@@ -721,6 +721,7 @@ impl<REv> EffectBuilder<REv> {
     }
 
     /// Gets the requested block header from the linear block store.
+    #[allow(unused)]
     pub(crate) async fn get_block_header_from_storage(
         self,
         block_hash: BlockHash,
@@ -818,6 +819,24 @@ impl<REv> EffectBuilder<REv> {
     {
         self.make_request(
             |responder| StorageRequest::GetBlockHeaderAtHeight { height, responder },
+            QueueKind::Regular,
+        )
+        .await
+    }
+
+    /// Requests the header of the block containing the given deploy.
+    pub(crate) async fn get_block_header_for_deploy_from_storage(
+        self,
+        deploy_hash: DeployHash,
+    ) -> Option<BlockHeader>
+    where
+        REv: From<StorageRequest>,
+    {
+        self.make_request(
+            |responder| StorageRequest::GetBlockHeaderForDeploy {
+                deploy_hash,
+                responder,
+            },
             QueueKind::Regular,
         )
         .await
@@ -1101,31 +1120,31 @@ impl<REv> EffectBuilder<REv> {
     }
 
     /// Passes the timestamp of a future block for which deploys are to be proposed.
-    pub(crate) async fn request_proto_block(
+    pub(crate) async fn request_block_payload(
         self,
-        block_context: BlockContext,
+        current_instant: Timestamp,
         past_deploys: HashSet<DeployHash>,
         next_finalized: u64,
+        accusations: Vec<PublicKey>,
         random_bit: bool,
-    ) -> (ProtoBlock, BlockContext)
+    ) -> BlockPayload
     where
         REv: From<BlockProposerRequest>,
     {
-        let proto_block = self
-            .make_request(
-                |responder| {
-                    BlockProposerRequest::RequestProtoBlock(ProtoBlockRequest {
-                        current_instant: block_context.timestamp(),
-                        past_deploys,
-                        next_finalized,
-                        responder,
-                        random_bit,
-                    })
-                },
-                QueueKind::Regular,
-            )
-            .await;
-        (proto_block, block_context)
+        self.make_request(
+            |responder| {
+                BlockProposerRequest::RequestBlockPayload(BlockPayloadRequest {
+                    current_instant,
+                    past_deploys,
+                    next_finalized,
+                    responder,
+                    accusations,
+                    random_bit,
+                })
+            },
+            QueueKind::Regular,
+        )
+        .await
     }
 
     /// Passes a finalized proto-block to the block executor component to execute it.
@@ -1141,55 +1160,25 @@ impl<REv> EffectBuilder<REv> {
             .await
     }
 
-    /// Checks whether the deploys included in the block exist on the network. This includes
-    /// the block's timestamp, in order that it be checked against the timestamp of the deploys
-    /// within the block.
-    pub(crate) async fn validate_block<I>(
-        self,
-        sender: I,
-        block: Block,
-        block_timestamp: Timestamp,
-    ) -> (bool, Block)
+    /// Checks whether the deploys included in the block exist on the network and the block is
+    /// valid.
+    pub(crate) async fn validate_block<I, T>(self, sender: I, block: T) -> bool
     where
-        REv: From<BlockValidationRequest<Block, I>>,
+        REv: From<BlockValidationRequest<I>>,
+        T: Into<ValidatingBlock>,
     {
         self.make_request(
             |responder| BlockValidationRequest {
-                block,
+                block: block.into(),
                 sender,
                 responder,
-                block_timestamp,
             },
             QueueKind::Regular,
         )
         .await
     }
 
-    /// Checks whether the deploys included in the proto block exist on the network. This includes
-    /// the block's timestamp, in order that it be checked against the timestamp of the deploys
-    /// within the block.
-    pub(crate) async fn validate_proto_block<I>(
-        self,
-        sender: I,
-        block: ProtoBlock,
-        block_timestamp: Timestamp,
-    ) -> (bool, ProtoBlock)
-    where
-        REv: From<BlockValidationRequest<ProtoBlock, I>>,
-    {
-        self.make_request(
-            |responder| BlockValidationRequest {
-                block,
-                sender,
-                responder,
-                block_timestamp,
-            },
-            QueueKind::Regular,
-        )
-        .await
-    }
-
-    /// Announces that a proto block has been finalized.
+    /// Announces that a block has been finalized.
     pub(crate) async fn announce_finalized_block(self, finalized_block: FinalizedBlock)
     where
         REv: From<ConsensusAnnouncement>,

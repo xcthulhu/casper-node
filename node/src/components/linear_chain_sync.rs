@@ -546,24 +546,25 @@ where
             Event::NewPeerConnected(peer_id) => {
                 trace!(%peer_id, "new peer connected");
                 self.peers.push(peer_id.clone());
-                match self.init_hash {
-                    Some(init_hash) if !self.started => {
-                        self.started = true;
-                        (async move {
-                            match operations::run_fast_sync_task(effect_builder, init_hash).await {
-                                Ok(()) => Some(Event::Start(peer_id)),
-                                Err(error) => {
-                                    effect_builder
-                                        .fatal(file!(), line!(), format!("{:?}", error))
-                                        .await;
-                                    None
-                                }
-                            }
-                        })
-                        .map_some(std::convert::identity)
-                    }
-                    _ => Effects::new(),
-                }
+                // match self.init_hash {
+                //     Some(init_hash) if !self.started => {
+                //         self.started = true;
+                //         (async move {
+                //             match operations::run_fast_sync_task(effect_builder, init_hash).await
+                // {                 Ok(()) => Some(Event::Start(peer_id)),
+                //                 Err(error) => {
+                //                     effect_builder
+                //                         .fatal(file!(), line!(), format!("{:?}", error))
+                //                         .await;
+                //                     None
+                //                 }
+                //             }
+                //         })
+                //         .map_some(std::convert::identity)
+                //     }
+                //     _ => Effects::new(),
+                // }
+                Effects::new()
             }
             Event::Start(init_peer) => {
                 match &self.state {
@@ -838,11 +839,10 @@ fn fetch_block_deploys<I: Debug + Clone + Eq + Send + 'static, REv>(
 where
     REv: ReactorEventT<I>,
 {
-    let block_timestamp = block.header().timestamp();
     effect_builder
-        .validate_block(peer.clone(), block, block_timestamp)
-        .event(move |(found, block)| {
-            if found {
+        .validate_block(peer.clone(), block.clone())
+        .event(move |valid| {
+            if valid {
                 Event::GetDeploysResult(DeploysResult::Found(Box::new(block)))
             } else {
                 Event::GetDeploysResult(DeploysResult::NotFound(Box::new(block), peer))
