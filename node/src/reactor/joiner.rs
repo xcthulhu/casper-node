@@ -3,7 +3,6 @@
 mod memory_metrics;
 
 use std::{
-    collections::BTreeMap,
     env,
     fmt::{self, Display, Formatter},
     path::PathBuf,
@@ -18,9 +17,8 @@ use reactor::ReactorEvent;
 use serde::Serialize;
 use tracing::{debug, error, info, warn};
 
-use casper_types::{PublicKey, U512};
-
-use crate::components::linear_chain_sync::{self, LinearChainSync};
+use casper_execution_engine::{shared::stored_value::StoredValue, storage::trie::Trie};
+use casper_types::Key;
 
 #[cfg(test)]
 use crate::testing::network::NetworkedReactor;
@@ -35,6 +33,7 @@ use crate::{
         fetcher::{self, FetchedOrNotFound, Fetcher},
         gossiper::{self, Gossiper},
         linear_chain,
+        linear_chain_sync::{self, LinearChainSync},
         metrics::Metrics,
         network::{self, Network, NetworkIdentity, ENABLE_LIBP2P_NET_ENV_VAR},
         rest_server::{self, RestServer},
@@ -64,8 +63,8 @@ use crate::{
         EventQueueHandle, Finalize, ReactorExit,
     },
     types::{
-        Block, BlockHash, BlockHeader, BlockHeaderWithMetadata, BlockWithMetadata, Deploy,
-        DeployHash, ExitCode, NodeId, ProtoBlock, Tag, Timestamp,
+        Block, BlockAndMetadata, BlockHash, BlockHeader, BlockHeaderAndMetadata, Deploy,
+        DeployHash, NodeId, ProtoBlock, Tag, Timestamp,
     },
     utils::{Source, WithDir},
     NodeRng,
@@ -116,9 +115,21 @@ pub enum Event {
     #[from]
     BlockFetcher(#[serde(skip_serializing)] fetcher::Event<Block>),
 
+    /// Trie fetcher event.
+    #[from]
+    TrieFetcher(#[serde(skip_serializing)] fetcher::Event<Trie<Key, StoredValue>>),
+
+    /// Block header (without metadata) fetcher event.
+    #[from]
+    BlockHeaderFetcher(#[serde(skip_serializing)] fetcher::Event<BlockHeader>),
+
+    /// Block header with metadata by height fetcher event.
+    #[from]
+    BlockHeaderByHeightFetcher(#[serde(skip_serializing)] fetcher::Event<BlockHeaderAndMetadata>),
+
     /// Linear chain (by height) fetcher event.
     #[from]
-    BlockByHeightFetcher(#[serde(skip_serializing)] fetcher::Event<BlockWithMetadata>),
+    BlockByHeightFetcher(#[serde(skip_serializing)] fetcher::Event<BlockAndMetadata>),
 
     /// Deploy fetcher event.
     #[from]
@@ -153,10 +164,24 @@ pub enum Event {
     #[from]
     BlockFetcherRequest(#[serde(skip_serializing)] FetcherRequest<NodeId, Block>),
 
+    /// Trie fetcher request.
+    #[from]
+    TrieFetcherRequest(#[serde(skip_serializing)] FetcherRequest<NodeId, Trie<Key, StoredValue>>),
+
+    /// Blocker header (with no metadata) fetcher request.
+    #[from]
+    BlockHeaderFetcherRequest(#[serde(skip_serializing)] FetcherRequest<NodeId, BlockHeader>),
+
+    /// Block header with metadata by height fetcher request.
+    #[from]
+    BlockHeaderByHeightFetcherRequest(
+        #[serde(skip_serializing)] FetcherRequest<NodeId, BlockHeaderAndMetadata>,
+    ),
+
     /// Linear chain block by height fetcher request.
     #[from]
     BlockByHeightFetcherRequest(
-        #[serde(skip_serializing)] FetcherRequest<NodeId, BlockWithMetadata>,
+        #[serde(skip_serializing)] FetcherRequest<NodeId, BlockAndMetadata>,
     ),
 
     /// Deploy fetcher request.
@@ -319,6 +344,28 @@ impl Display for Event {
             }
             Event::StateStoreRequest(req) => write!(f, "state store request: {}", req),
             Event::ConsensusRequest(req) => write!(f, "consensus request: {:?}", req),
+            Event::TrieFetcher(trie) => {
+                write!(f, "trie fetcher event: {}", trie)
+            }
+            Event::TrieFetcherRequest(req) => {
+                write!(f, "trie fetcher request: {}", req)
+            }
+            Event::BlockHeaderFetcher(block_header) => {
+                write!(f, "block header fetcher event: {}", block_header)
+            }
+            Event::BlockHeaderFetcherRequest(req) => {
+                write!(f, "block header fetcher request: {}", req)
+            }
+            Event::BlockHeaderByHeightFetcher(block_header_by_height) => {
+                write!(
+                    f,
+                    "block header by height fetcher event: {}",
+                    block_header_by_height
+                )
+            }
+            Event::BlockHeaderByHeightFetcherRequest(req) => {
+                write!(f, "block header by height fetcher request: {}", req)
+            }
         }
     }
 }
@@ -341,9 +388,11 @@ pub struct Reactor {
     deploy_fetcher: Fetcher<Deploy>,
     linear_chain: linear_chain::LinearChainComponent<NodeId>,
     // Handles request for linear chain block by height.
-    block_by_height_fetcher: Fetcher<BlockWithMetadata>,
+    block_by_height_fetcher: Fetcher<BlockAndMetadata>,
     pub(super) block_header_by_hash_fetcher: Fetcher<BlockHeader>,
-    pub(super) block_header_with_metadata_fetcher: Fetcher<BlockHeaderWithMetadata>,
+    pub(super) block_header_and_metadata_fetcher: Fetcher<BlockHeaderAndMetadata>,
+    // Handles request for fetching tries from the network.
+    pub(super) trie_fetcher: Fetcher<Trie<Key, StoredValue>>,
     #[data_size(skip)]
     deploy_acceptor: DeployAcceptor,
     #[data_size(skip)]
@@ -410,6 +459,8 @@ impl reactor::Reactor for Reactor {
         )?;
 
         let linear_chain_fetcher = Fetcher::new("linear_chain", config.fetcher, &registry)?;
+        let trie_fetcher: Fetcher<Trie<Key, StoredValue>> =
+            Fetcher::new("trie_fetcher", config.fetcher, &registry)?;
 
         let mut effects = reactor::wrap_effects(Event::Network, network_effects);
         effects.extend(reactor::wrap_effects(
@@ -469,7 +520,7 @@ impl reactor::Reactor for Reactor {
         let block_by_height_fetcher = Fetcher::new("block_by_height", config.fetcher, &registry)?;
 
         let block_header_and_finality_signatures_by_height_fetcher: Fetcher<
-            BlockHeaderWithMetadata,
+            BlockHeaderAndMetadata,
         > = Fetcher::new(
             "block_header_and_finality_signatures_by_height",
             config.fetcher,
@@ -494,13 +545,6 @@ impl reactor::Reactor for Reactor {
             chainspec_loader.chainspec().core_config.unbonding_delay,
         )?;
 
-        let validator_weights: BTreeMap<PublicKey, U512> = chainspec_loader
-            .chainspec()
-            .network_config
-            .chainspec_validator_stakes()
-            .into_iter()
-            .map(|(pk, motes)| (pk, motes.value()))
-            .collect();
         let maybe_next_activation_point = chainspec_loader
             .next_upgrade()
             .map(|next_upgrade| next_upgrade.activation_point());
@@ -511,7 +555,6 @@ impl reactor::Reactor for Reactor {
             &storage,
             init_hash,
             chainspec_loader.initial_block().cloned(),
-            validator_weights,
             maybe_next_activation_point,
         )?;
 
@@ -537,12 +580,13 @@ impl reactor::Reactor for Reactor {
                 contract_runtime,
                 linear_chain_sync,
                 linear_chain_fetcher,
+                trie_fetcher,
                 block_validator,
                 deploy_fetcher,
                 linear_chain,
                 block_by_height_fetcher,
                 block_header_by_hash_fetcher,
-                block_header_with_metadata_fetcher:
+                block_header_and_metadata_fetcher:
                     block_header_and_finality_signatures_by_height_fetcher,
                 deploy_acceptor,
                 event_queue_metrics,
@@ -619,13 +663,12 @@ impl reactor::Reactor for Reactor {
                     tag: Tag::BlockAndMetadataByHeight,
                     serialized_item,
                 } => {
-                    let event = match bincode::deserialize::<
-                        FetchedOrNotFound<BlockWithMetadata, u64>,
-                    >(&serialized_item)
-                    {
-                        Ok(FetchedOrNotFound::Fetched(block_with_metadata)) => {
+                    let event = match bincode::deserialize::<FetchedOrNotFound<BlockAndMetadata, u64>>(
+                        &serialized_item,
+                    ) {
+                        Ok(FetchedOrNotFound::Fetched(block_and_metadata)) => {
                             fetcher::Event::GotRemotely {
-                                item: Box::new(block_with_metadata),
+                                item: Box::new(block_and_metadata),
                                 source: Source::Peer(sender),
                             }
                         }
@@ -641,6 +684,42 @@ impl reactor::Reactor for Reactor {
                         }
                     };
                     self.dispatch_event(effect_builder, rng, Event::BlockByHeightFetcher(event))
+                }
+                Message::GetResponse {
+                    tag: Tag::Trie,
+                    serialized_item,
+                } => {
+                    let trie: Box<Trie<Key, StoredValue>> =
+                        match bincode::deserialize(&serialized_item) {
+                            Ok(trie) => Box::new(trie),
+                            Err(err) => {
+                                error!("failed to decode trie from {}: {}", sender, err);
+                                return Effects::new();
+                            }
+                        };
+                    let event = fetcher::Event::GotRemotely {
+                        item: trie,
+                        source: Source::Peer(sender),
+                    };
+                    self.dispatch_event(effect_builder, rng, Event::TrieFetcher(event))
+                }
+                Message::GetResponse {
+                    tag: Tag::BlockHeaderByHash,
+                    serialized_item,
+                } => {
+                    let block_header: Box<BlockHeader> =
+                        match bincode::deserialize(&serialized_item) {
+                            Ok(block_header) => Box::new(block_header),
+                            Err(err) => {
+                                error!("failed to decode block header from {}: {}", sender, err);
+                                return Effects::new();
+                            }
+                        };
+                    let event = fetcher::Event::GotRemotely {
+                        item: block_header,
+                        source: Source::Peer(sender),
+                    };
+                    self.dispatch_event(effect_builder, rng, Event::BlockHeaderFetcher(event))
                 }
                 Message::GetResponse {
                     tag: Tag::Deploy,
@@ -743,6 +822,15 @@ impl reactor::Reactor for Reactor {
                 self.block_by_height_fetcher
                     .handle_event(effect_builder, rng, event),
             ),
+            Event::TrieFetcher(event) => reactor::wrap_effects(
+                Event::TrieFetcher,
+                self.trie_fetcher.handle_event(effect_builder, rng, event),
+            ),
+            Event::BlockHeaderFetcher(event) => reactor::wrap_effects(
+                Event::BlockHeaderFetcher,
+                self.block_header_by_hash_fetcher
+                    .handle_event(effect_builder, rng, event),
+            ),
             Event::DeployFetcherRequest(request) => {
                 self.dispatch_event(effect_builder, rng, Event::DeployFetcher(request.into()))
             }
@@ -750,6 +838,14 @@ impl reactor::Reactor for Reactor {
                 effect_builder,
                 rng,
                 Event::BlockByHeightFetcher(request.into()),
+            ),
+            Event::TrieFetcherRequest(request) => {
+                self.dispatch_event(effect_builder, rng, Event::TrieFetcher(request.into()))
+            }
+            Event::BlockHeaderFetcherRequest(request) => self.dispatch_event(
+                effect_builder,
+                rng,
+                Event::BlockHeaderFetcher(request.into()),
             ),
             Event::ContractRuntime(event) => reactor::wrap_effects(
                 Event::ContractRuntime,
@@ -885,11 +981,14 @@ impl reactor::Reactor for Reactor {
                 );
                 let mut effects = self.dispatch_event(effect_builder, rng, reactor_event);
 
-                let reactor_event =
+                effects.extend(self.dispatch_event(
+                    effect_builder,
+                    rng,
                     Event::LinearChainSync(linear_chain_sync::Event::GotUpgradeActivationPoint(
                         next_upgrade.activation_point(),
-                    ));
-                effects.extend(self.dispatch_event(effect_builder, rng, reactor_event));
+                    )),
+                ));
+
                 effects
             }
             // This is done to handle status requests from the RestServer
@@ -897,12 +996,24 @@ impl reactor::Reactor for Reactor {
                 // no consensus, respond with None
                 responder.respond(None).ignore()
             }
+            Event::BlockHeaderByHeightFetcher(event) => reactor::wrap_effects(
+                Event::BlockHeaderByHeightFetcher,
+                self.block_header_and_metadata_fetcher
+                    .handle_event(effect_builder, rng, event),
+            ),
+            Event::BlockHeaderByHeightFetcherRequest(request) => self.dispatch_event(
+                effect_builder,
+                rng,
+                Event::BlockHeaderByHeightFetcher(request.into()),
+            ),
         }
     }
 
     fn maybe_exit(&self) -> Option<ReactorExit> {
         if self.linear_chain_sync.stopped_for_upgrade() {
-            Some(ReactorExit::ProcessShouldExit(ExitCode::Success))
+            Some(ReactorExit::ProcessShouldExit(
+                crate::types::ExitCode::Success,
+            ))
         } else if self.linear_chain_sync.is_synced() {
             Some(ReactorExit::ProcessShouldContinue)
         } else {

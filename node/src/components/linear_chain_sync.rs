@@ -1,36 +1,14 @@
 //! Linear chain synchronizer.
-//!
-//! Synchronizes the linear chain when node joins the network.
-//!
-//! Steps are:
-//! 1. Fetch blocks up to initial, trusted hash (blocks are downloaded starting from trusted hash up
-//! until Genesis).
-//! 2. Fetch deploys of the lowest height block.
-//! 3. Execute that block.
-//! 4. Repeat steps 2-3 until trusted hash is reached.
-//! 5. Transition to `SyncingDescendants` state.
-//! 6. Fetch child block of highest block.
-//! 7. Fetch deploys of that block.
-//! 8. Execute that block.
-//! 9. Repeat steps 6-8 as long as there's a child in the linear chain.
-//!
-//! The order of "download block – download deploys – execute" block steps differ,
-//! in order to increase the chances of catching up with the linear chain quicker.
-//! When synchronizing linear chain up to the trusted hash we cannot execute later blocks without
-//! earlier ones. When we're syncing descendants, on the other hand, we can and we want to do it
-//! ASAP so that we can start participating in consensus. That's why deploy fetching and block
-//! execution is interleaved. If we had downloaded the whole chain, and then deploys, and then
-//! execute (as we do in the first, SynchronizeTrustedHash, phase) it would have taken more time and
-//! we might miss more eras.
 
+mod error;
 mod event;
 mod metrics;
+mod operations;
 mod peers;
 mod state;
 mod traits;
 
 use std::{
-    collections::BTreeMap,
     convert::Infallible,
     fmt::{Debug, Display},
     mem,
@@ -41,7 +19,7 @@ use datasize::DataSize;
 use prometheus::Registry;
 use tracing::{error, info, trace, warn};
 
-use casper_types::{EraId, ProtocolVersion, PublicKey, U512};
+use casper_types::{EraId, Key, ProtocolVersion};
 
 use self::event::{BlockByHashResult, DeploysResult};
 
@@ -51,13 +29,18 @@ use super::{
 };
 use crate::{
     components::fetcher::{FetchedData, FetcherError},
-    effect::{EffectBuilder, EffectExt, EffectOptionExt, Effects},
+    effect::{
+        requests::{FetcherRequest, NetworkInfoRequest},
+        EffectBuilder, EffectExt, EffectOptionExt, Effects,
+    },
     fatal,
     types::{
-        ActivationPoint, Block, BlockHash, BlockWithMetadata, Chainspec, FinalizedBlock, TimeDiff,
+        ActivationPoint, Block, BlockAndMetadata, BlockHash, BlockHeader, Chainspec,
+        FinalizedBlock, TimeDiff,
     },
     NodeRng,
 };
+use casper_execution_engine::{shared::stored_value::StoredValue, storage::trie::Trie};
 use event::BlockByHeightResult;
 pub use event::Event;
 pub use metrics::LinearChainSyncMetrics;
@@ -67,6 +50,10 @@ pub use traits::ReactorEventT;
 
 #[derive(DataSize, Debug)]
 pub(crate) struct LinearChainSync<I> {
+    init_hash: Option<BlockHash>,
+    chainspec: Chainspec,
+    started: bool,
+
     peers: PeersState<I>,
     state: State,
     #[data_size(skip)]
@@ -99,7 +86,6 @@ impl<I: Clone + PartialEq + 'static> LinearChainSync<I> {
         storage: &Storage,
         init_hash: Option<BlockHash>,
         highest_block: Option<Block>,
-        _genesis_validator_weights: BTreeMap<PublicKey, U512>,
         next_upgrade_activation_point: Option<ActivationPoint>,
     ) -> Result<(Self, Effects<Event<I>>), Err>
     where
@@ -114,6 +100,7 @@ impl<I: Clone + PartialEq + 'static> LinearChainSync<I> {
         let protocol_version = chainspec.protocol_config.version;
         if let Some(state) = read_init_state(storage, chainspec)? {
             let linear_chain_sync = LinearChainSync::from_state(
+                init_hash,
                 registry,
                 chainspec,
                 state,
@@ -138,6 +125,10 @@ impl<I: Clone + PartialEq + 'static> LinearChainSync<I> {
             };
             let state_key = create_state_key(&chainspec);
             let linear_chain_sync = LinearChainSync {
+                init_hash,
+                chainspec: chainspec.clone(),
+                started: false,
+
                 peers: PeersState::new(),
                 state,
                 metrics: LinearChainSyncMetrics::new(registry)?,
@@ -155,6 +146,7 @@ impl<I: Clone + PartialEq + 'static> LinearChainSync<I> {
 
     /// Initialize `LinearChainSync` component from preloaded `State`.
     fn from_state(
+        init_hash: Option<BlockHash>,
         registry: &Registry,
         chainspec: &Chainspec,
         state: State,
@@ -170,6 +162,10 @@ impl<I: Clone + PartialEq + 'static> LinearChainSync<I> {
             chainspec.core_config.era_duration,
         );
         Ok(LinearChainSync {
+            init_hash,
+            chainspec: chainspec.clone(),
+            started: false,
+
             peers: PeersState::new(),
             state,
             metrics: LinearChainSyncMetrics::new(registry)?,
@@ -531,8 +527,11 @@ impl<I: Clone + PartialEq + 'static> LinearChainSync<I> {
 
 impl<I, REv> Component<REv> for LinearChainSync<I>
 where
-    I: Debug + Display + Clone + Eq + Send + PartialEq + 'static,
-    REv: ReactorEventT<I>,
+    I: Debug + Display + Clone + Eq + Send + PartialEq + Sync + 'static,
+    REv: ReactorEventT<I>
+        + From<FetcherRequest<I, BlockHeader>>
+        + From<NetworkInfoRequest<I>>
+        + From<FetcherRequest<I, Trie<Key, StoredValue>>>,
 {
     type Event = Event<I>;
     type ConstructionError = Infallible;
@@ -544,6 +543,28 @@ where
         event: Self::Event,
     ) -> Effects<Self::Event> {
         match event {
+            Event::NewPeerConnected(peer_id) => {
+                trace!(%peer_id, "new peer connected");
+                self.peers.push(peer_id.clone());
+                match self.init_hash {
+                    Some(init_hash) if !self.started => {
+                        self.started = true;
+                        (async move {
+                            match operations::run_fast_sync_task(effect_builder, init_hash).await {
+                                Ok(()) => Some(Event::Start(peer_id)),
+                                Err(error) => {
+                                    effect_builder
+                                        .fatal(file!(), line!(), format!("{:?}", error))
+                                        .await;
+                                    None
+                                }
+                            }
+                        })
+                        .map_some(std::convert::identity)
+                    }
+                    _ => Effects::new(),
+                }
+            }
             Event::Start(init_peer) => {
                 match &self.state {
                     State::None => {
@@ -775,22 +796,6 @@ where
                 self.peers.reset(rng);
                 self.fetch_next_block_deploys(effect_builder)
             }
-            Event::NewPeerConnected(peer_id) => {
-                trace!(%peer_id, "new peer connected");
-                // Add to the set of peers we can request things from.
-                let mut effects = Effects::new();
-                if self.peers.is_empty() {
-                    // First peer connected, start downloading.
-                    let cloned_peer_id = peer_id.clone();
-                    effects.extend(
-                        effect_builder
-                            .immediately()
-                            .event(move |_| Event::Start(cloned_peer_id)),
-                    );
-                }
-                self.peers.push(peer_id);
-                effects
-            }
             Event::BlockHandled(block) => {
                 let block_height = block.height();
                 let block_hash = *block.hash();
@@ -901,7 +906,7 @@ where
     async move {
         let peer_to_fetch_from = peer.clone();
         match effect_builder
-            .fetch::<BlockWithMetadata, I>(block_height, peer_to_fetch_from)
+            .fetch::<BlockAndMetadata, I>(block_height, peer_to_fetch_from)
             .await
         {
             Ok(FetchedData::FromStorage { item }) => Event::GetBlockHeightResult(

@@ -848,12 +848,12 @@ impl FromBytes for BlockHeader {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct BlockHeaderWithMetadata {
+pub struct BlockHeaderAndMetadata {
     pub block_header: BlockHeader,
     pub block_signatures: BlockSignatures,
 }
 
-impl Display for BlockHeaderWithMetadata {
+impl Display for BlockHeaderAndMetadata {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{} and {}", self.block_header, self.block_signatures)
     }
@@ -1285,12 +1285,12 @@ impl Item for Block {
 
 /// A wrapper around `Block` for the purposes of fetching blocks by height in linear chain.
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BlockWithMetadata {
+pub struct BlockAndMetadata {
     pub block: Block,
     pub finality_signatures: BlockSignatures,
 }
 
-impl Display for BlockWithMetadata {
+impl Display for BlockAndMetadata {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -1302,7 +1302,7 @@ impl Display for BlockWithMetadata {
     }
 }
 
-impl Item for BlockWithMetadata {
+impl Item for BlockAndMetadata {
     type Id = u64;
 
     const TAG: Tag = Tag::BlockAndMetadataByHeight;

@@ -8,13 +8,13 @@ use crate::{
             StorageRequest,
         },
     },
-    types::{Block, BlockWithMetadata},
+    types::{Block, BlockAndMetadata},
 };
 
 pub trait ReactorEventT<I: Debug + Eq>:
     From<StorageRequest>
     + From<FetcherRequest<I, Block>>
-    + From<FetcherRequest<I, BlockWithMetadata>>
+    + From<FetcherRequest<I, BlockAndMetadata>>
     + From<BlockValidationRequest<Block, I>>
     + From<ContractRuntimeRequest>
     + From<StateStoreRequest>
@@ -27,7 +27,7 @@ impl<I, REv> ReactorEventT<I> for REv
 where
     REv: From<StorageRequest>
         + From<FetcherRequest<I, Block>>
-        + From<FetcherRequest<I, BlockWithMetadata>>
+        + From<FetcherRequest<I, BlockAndMetadata>>
         + From<BlockValidationRequest<Block, I>>
         + From<ContractRuntimeRequest>
         + From<StateStoreRequest>

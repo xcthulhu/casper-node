@@ -109,9 +109,9 @@ use crate::{
     crypto::hash::Digest,
     reactor::{EventQueueHandle, QueueKind},
     types::{
-        Block, BlockHash, BlockHeader, BlockSignatures, BlockWithMetadata, Chainspec,
-        ChainspecInfo, Deploy, DeployHash, DeployHeader, DeployMetadata, FinalitySignature,
-        FinalizedBlock, Item, ProtoBlock, TimeDiff, Timestamp,
+        Block, BlockAndMetadata, BlockHash, BlockHeader, BlockHeaderAndMetadata, BlockSignatures,
+        Chainspec, ChainspecInfo, Deploy, DeployHash, DeployHeader, DeployMetadata,
+        FinalitySignature, FinalizedBlock, Item, ProtoBlock, TimeDiff, Timestamp,
     },
     utils::Source,
 };
@@ -738,6 +738,25 @@ impl<REv> EffectBuilder<REv> {
         .await
     }
 
+    /// Gets the requested block header and its associated finality signatures from the linear block
+    /// store.
+    pub(crate) async fn get_block_and_metadata_at_height_from_storage(
+        self,
+        block_height: u64,
+    ) -> Option<BlockHeaderAndMetadata>
+    where
+        REv: From<StorageRequest>,
+    {
+        self.make_request(
+            |responder| StorageRequest::GetBlockHeaderAndMetadataByHeight {
+                block_height,
+                responder,
+            },
+            QueueKind::Regular,
+        )
+        .await
+    }
+
     /// Gets the requested signatures for a given block hash.
     pub(crate) async fn get_signatures_from_storage(
         self,
@@ -913,7 +932,6 @@ impl<REv> EffectBuilder<REv> {
     }
 
     /// Puts a trie into the trie store and asynchronously returns any missing descendant trie keys.
-    #[allow(unused)]
     pub(crate) async fn put_trie_and_find_missing_descendant_trie_keys(
         self,
         trie: Box<Trie<Key, StoredValue>>,
@@ -997,10 +1015,10 @@ impl<REv> EffectBuilder<REv> {
     }
 
     /// Gets the requested block and its associated metadata.
-    pub(crate) async fn get_block_at_height_with_metadata_from_storage(
+    pub(crate) async fn get_block_and_metadata_by_height_from_storage(
         self,
         block_height: u64,
-    ) -> Option<BlockWithMetadata>
+    ) -> Option<BlockAndMetadata>
     where
         REv: From<StorageRequest>,
     {
@@ -1014,11 +1032,29 @@ impl<REv> EffectBuilder<REv> {
         .await
     }
 
+    /// Gets the requested block and its associated metadata.
+    pub(crate) async fn get_block_header_and_metadata_at_height_from_storage(
+        self,
+        block_height: u64,
+    ) -> Option<BlockHeaderAndMetadata>
+    where
+        REv: From<StorageRequest>,
+    {
+        self.make_request(
+            |responder| StorageRequest::GetBlockHeaderAndMetadataByHeight {
+                block_height,
+                responder,
+            },
+            QueueKind::Regular,
+        )
+        .await
+    }
+
     /// Gets the requested block by hash with its associated metadata.
-    pub(crate) async fn get_block_with_metadata_from_storage(
+    pub(crate) async fn get_block_and_metadata_from_storage(
         self,
         block_hash: BlockHash,
-    ) -> Option<BlockWithMetadata>
+    ) -> Option<BlockAndMetadata>
     where
         REv: From<StorageRequest>,
     {
@@ -1033,14 +1069,14 @@ impl<REv> EffectBuilder<REv> {
     }
 
     /// Get the highest block with its associated metadata.
-    pub(crate) async fn get_highest_block_with_metadata_from_storage(
+    pub(crate) async fn get_highest_block_and_metadata_from_storage(
         self,
-    ) -> Option<BlockWithMetadata>
+    ) -> Option<BlockAndMetadata>
     where
         REv: From<StorageRequest>,
     {
         self.make_request(
-            |responder| StorageRequest::GetHighestBlockWithMetadata { responder },
+            |responder| StorageRequest::GetHighestBlockAndMetadata { responder },
             QueueKind::Regular,
         )
         .await

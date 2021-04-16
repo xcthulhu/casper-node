@@ -66,6 +66,7 @@ use crate::{
     utils::{Source, WithDir},
     NodeRng,
 };
+use casper_execution_engine::shared::newtypes::Blake2bHash;
 pub use config::Config;
 pub use error::Error;
 use linear_chain::LinearChainComponent;
@@ -726,7 +727,7 @@ impl reactor::Reactor for Reactor {
                                 }
                             };
                             Event::LinearChain(linear_chain::Event::Request(
-                                LinearChainRequest::BlockWithMetadataAtHeight(height, sender),
+                                LinearChainRequest::BlockAndMetadataAtHeight(height, sender),
                             ))
                         }
                         Tag::GossipedAddress => {
@@ -770,7 +771,7 @@ impl reactor::Reactor for Reactor {
                                 }
                             };
                         }
-                        Tag::BlockHeaderAndFinalitySignaturesByHeight => {
+                        Tag::BlockHeaderAndMetadataByHeight => {
                             let block_height: u64 = match bincode::deserialize(&serialized_id) {
                                 Ok(block_height) => block_height,
                                 Err(error) => {
@@ -808,6 +809,43 @@ impl reactor::Reactor for Reactor {
                                 }
                                 Err(error) => {
                                     error!("failed to create get-response: {}", error);
+                                    return Effects::new();
+                                }
+                            };
+                        }
+                        Tag::Trie => {
+                            let trie_key: Blake2bHash = match bincode::deserialize(&serialized_id) {
+                                Ok(trie_key) => trie_key,
+                                Err(error) => {
+                                    error!(
+                                        "failed to decode {:?} from {}: {}",
+                                        serialized_id, sender, error
+                                    );
+                                    return Effects::new();
+                                }
+                            };
+                            let fetched_or_not_found_trie =
+                                match self.contract_runtime.read_trie(trie_key) {
+                                    Ok(Some(trie)) => FetchedOrNotFound::Fetched(trie),
+                                    Ok(None) => FetchedOrNotFound::NotFound(trie_key),
+                                    Err(error) => {
+                                        error!(
+                                        "error when trying to get trie with trie_key {} for {}: {}",
+                                        trie_key, sender, error
+                                    );
+                                        return Effects::new();
+                                    }
+                                };
+                            match Message::new_get_response(&fetched_or_not_found_trie) {
+                                Ok(message) => {
+                                    return effect_builder.send_message(sender, message).ignore();
+                                }
+                                Err(error) => {
+                                    error!(
+                                        "failed to create get-response after retrieving \
+                                            trie_key {}: {}",
+                                        trie_key, error
+                                    );
                                     return Effects::new();
                                 }
                             };
@@ -870,7 +908,7 @@ impl reactor::Reactor for Reactor {
                             );
                             return Effects::new();
                         }
-                        Tag::BlockHeaderAndFinalitySignaturesByHeight => {
+                        Tag::BlockHeaderAndMetadataByHeight => {
                             error!(
                                 "cannot handle get response for \
                                  block-header-and-finality-signatures-by-height from {}",
@@ -878,6 +916,7 @@ impl reactor::Reactor for Reactor {
                             );
                             return Effects::new();
                         }
+                        Tag::Trie => todo!("Handle GET ReadTrie response"),
                     },
                     Message::FinalitySignature(fs) => {
                         Event::LinearChain(linear_chain::Event::FinalitySignatureReceived(fs, true))

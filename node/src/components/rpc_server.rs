@@ -197,7 +197,7 @@ where
                 maybe_id: Some(BlockIdentifier::Hash(hash)),
                 responder,
             }) => effect_builder
-                .get_block_with_metadata_from_storage(hash)
+                .get_block_and_metadata_from_storage(hash)
                 .event(move |result| Event::GetBlockResult {
                     maybe_id: Some(BlockIdentifier::Hash(hash)),
                     result: Box::new(result),
@@ -207,7 +207,7 @@ where
                 maybe_id: Some(BlockIdentifier::Height(height)),
                 responder,
             }) => effect_builder
-                .get_block_at_height_with_metadata_from_storage(height)
+                .get_block_and_metadata_by_height_from_storage(height)
                 .event(move |result| Event::GetBlockResult {
                     maybe_id: Some(BlockIdentifier::Height(height)),
                     result: Box::new(result),
@@ -217,7 +217,7 @@ where
                 maybe_id: None,
                 responder,
             }) => effect_builder
-                .get_highest_block_with_metadata_from_storage()
+                .get_highest_block_and_metadata_from_storage()
                 .event(move |result| Event::GetBlockResult {
                     maybe_id: None,
                     result: Box::new(result),

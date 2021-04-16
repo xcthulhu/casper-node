@@ -45,9 +45,9 @@ use crate::{
     crypto::hash::Digest,
     rpcs::chain::BlockIdentifier,
     types::{
-        Block, BlockHash, BlockHeader, BlockSignatures, BlockWithMetadata, Chainspec,
-        ChainspecInfo, Deploy, DeployHash, DeployHeader, DeployMetadata, FinalizedBlock, Item,
-        NodeId, ProtoBlock, StatusFeed, TimeDiff, Timestamp,
+        Block, BlockAndMetadata, BlockHash, BlockHeader, BlockHeaderAndMetadata, BlockSignatures,
+        Chainspec, ChainspecInfo, Deploy, DeployHash, DeployHeader, DeployMetadata, FinalizedBlock,
+        Item, NodeId, ProtoBlock, StatusFeed, TimeDiff, Timestamp,
     },
     utils::DisplayIter,
 };
@@ -269,6 +269,14 @@ pub enum StorageRequest {
         /// local storage.
         responder: Responder<Option<BlockHeader>>,
     },
+    /// Retrieve block header with metadata by height.
+    GetBlockHeaderAndMetadataByHeight {
+        /// Hash of block to get header of.
+        block_height: u64,
+        /// Responder to call with the result.  Returns `None` is the block header doesn't exist in
+        /// local storage.
+        responder: Responder<Option<BlockHeaderAndMetadata>>,
+    },
     /// Retrieve all transfers in a block with given hash.
     GetBlockTransfers {
         /// Hash of block to get transfers of.
@@ -334,19 +342,19 @@ pub enum StorageRequest {
         /// The hash of the block.
         block_hash: BlockHash,
         /// The responder to call with the results.
-        responder: Responder<Option<BlockWithMetadata>>,
+        responder: Responder<Option<BlockAndMetadata>>,
     },
     /// Retrieve block and its metadata at a given height.
     GetBlockAndMetadataByHeight {
         /// The height of the block.
         block_height: BlockHeight,
         /// The responder to call with the results.
-        responder: Responder<Option<BlockWithMetadata>>,
+        responder: Responder<Option<BlockAndMetadata>>,
     },
     /// Get the highest block and its metadata.
-    GetHighestBlockWithMetadata {
+    GetHighestBlockAndMetadata {
         /// The responder to call the results with.
-        responder: Responder<Option<BlockWithMetadata>>,
+        responder: Responder<Option<BlockAndMetadata>>,
     },
     /// Get finality signatures for a Block hash.
     GetBlockSignatures {
@@ -424,7 +432,7 @@ impl Display for StorageRequest {
                     block_height
                 )
             }
-            StorageRequest::GetHighestBlockWithMetadata { .. } => {
+            StorageRequest::GetHighestBlockAndMetadata { .. } => {
                 write!(formatter, "get highest block with metadata")
             }
             StorageRequest::GetBlockSignatures { block_hash, .. } => {
@@ -439,6 +447,13 @@ impl Display for StorageRequest {
             }
             StorageRequest::GetFinalizedDeploys { ttl, .. } => {
                 write!(formatter, "get finalized deploys, ttl: {:?}", ttl)
+            }
+            StorageRequest::GetBlockHeaderAndMetadataByHeight { block_height, .. } => {
+                write!(
+                    formatter,
+                    "get block and metadata for block by height: {}",
+                    block_height
+                )
             }
         }
     }
@@ -546,7 +561,7 @@ pub enum RpcRequest<I> {
         /// The identifier (can either be a hash or the height) of the block to be retrieved.
         maybe_id: Option<BlockIdentifier>,
         /// Responder to call with the result.
-        responder: Responder<Option<BlockWithMetadata>>,
+        responder: Responder<Option<BlockAndMetadata>>,
     },
     /// Return transfers for block by hash (if any).
     GetBlockTransfers {
@@ -942,7 +957,7 @@ pub enum LinearChainRequest<I> {
     /// Request whole block from the linear chain, by hash.
     BlockRequest(BlockHash, I),
     /// Request for a linear chain block at height.
-    BlockWithMetadataAtHeight(BlockHeight, I),
+    BlockAndMetadataAtHeight(BlockHeight, I),
 }
 
 impl<I: Display> Display for LinearChainRequest<I> {
@@ -951,7 +966,7 @@ impl<I: Display> Display for LinearChainRequest<I> {
             LinearChainRequest::BlockRequest(bh, peer) => {
                 write!(f, "block request for hash {} from {}", bh, peer)
             }
-            LinearChainRequest::BlockWithMetadataAtHeight(height, sender) => {
+            LinearChainRequest::BlockAndMetadataAtHeight(height, sender) => {
                 write!(f, "block request for {} from {}", height, sender)
             }
         }

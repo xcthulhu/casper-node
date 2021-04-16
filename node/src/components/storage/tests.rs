@@ -427,17 +427,17 @@ fn test_get_block_header_and_finality_signatures_by_height() {
     }
 
     {
-        let block_header_with_metadata = storage
+        let block_header_and_metadata = storage
             .read_block_header_and_finality_signatures_by_height(block.header().height())
             .expect("should not throw exception")
             .expect("should not be None");
         assert_eq!(
-            block_header_with_metadata.block_header,
+            block_header_and_metadata.block_header,
             block.header().clone(),
             "Should have retrieved expected block header"
         );
         assert_eq!(
-            block_header_with_metadata.block_signatures, block_signatures,
+            block_header_and_metadata.block_signatures, block_signatures,
             "Should have retrieved expected block signatures"
         );
     }

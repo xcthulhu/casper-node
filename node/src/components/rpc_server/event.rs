@@ -14,7 +14,7 @@ use casper_types::{system::auction::EraValidators, Transfer};
 use crate::{
     effect::{requests::RpcRequest, Responder},
     rpcs::chain::BlockIdentifier,
-    types::{BlockHash, BlockWithMetadata, Deploy, DeployHash, DeployMetadata, NodeId},
+    types::{BlockAndMetadata, BlockHash, Deploy, DeployHash, DeployMetadata, NodeId},
 };
 
 #[derive(Debug, From)]
@@ -23,8 +23,8 @@ pub enum Event {
     RpcRequest(RpcRequest<NodeId>),
     GetBlockResult {
         maybe_id: Option<BlockIdentifier>,
-        result: Box<Option<BlockWithMetadata>>,
-        main_responder: Responder<Option<BlockWithMetadata>>,
+        result: Box<Option<BlockAndMetadata>>,
+        main_responder: Responder<Option<BlockAndMetadata>>,
     },
     GetBlockTransfersResult {
         block_hash: BlockHash,

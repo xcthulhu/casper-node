@@ -154,16 +154,16 @@ where
                 }
             }
             .ignore(),
-            Event::Request(LinearChainRequest::BlockWithMetadataAtHeight(height, sender)) => {
+            Event::Request(LinearChainRequest::BlockAndMetadataAtHeight(height, sender)) => {
                 async move {
-                    let fetch_or_not_found_block_with_metadata = match effect_builder
-                        .get_block_at_height_with_metadata_from_storage(height)
+                    let fetch_or_not_found_block_and_metadata = match effect_builder
+                        .get_block_and_metadata_at_height_from_storage(height)
                         .await
                     {
                         None => FetchedOrNotFound::NotFound(height),
                         Some(block) => FetchedOrNotFound::Fetched(block),
                     };
-                    match Message::new_get_response(&fetch_or_not_found_block_with_metadata) {
+                    match Message::new_get_response(&fetch_or_not_found_block_and_metadata) {
                         Ok(message) => effect_builder.send_message(sender, message).await,
                         Err(error) => {
                             error!("failed to create get-response {}", error);
