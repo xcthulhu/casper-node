@@ -4,22 +4,54 @@ use casper_types::bytesrepr::{self, Bytes, FromBytes, ToBytes};
 
 use crate::{
     shared::newtypes::Blake2bHash,
-    storage::trie::{Pointer, Trie, RADIX},
+    storage::trie::{hash_pair, Pointer, Trie, RADIX},
 };
 
 const TRIE_MERKLE_PROOF_STEP_NODE_ID: u8 = 0;
 const TRIE_MERKLE_PROOF_STEP_EXTENSION_ID: u8 = 1;
+const TRIE_MERKLE_PROOF_ROSE_LEAF_ROSE_ID: u8 = 2;
+const TRIE_MERKLE_PROOF_ROSE_LEAF_LEAF_ID: u8 = 3;
+const TRIE_MERKLE_PROOF_ROSE_EXTENSION_ROSE_ID: u8 = 4;
+const TRIE_MERKLE_PROOF_ROSE_EXTENSION_EXTENSION_ID: u8 = 5;
+const TRIE_MERKLE_PROOF_ROSE_NODE_ROSE_ID: u8 = 6;
+const TRIE_MERKLE_PROOF_ROSE_NODE_NODE_ID: u8 = 7;
 
 /// A component of a proof that an entry exists in the Merkle trie.
+///
+/// Every "rose" variant has two proof components: one for the _rose_ itself and one for the basic
+/// variant it corresponds to.
+///
+/// While there is no corresponding proof component for a [Trie::Leaf], there _are_ corresponding
+/// proof components for [Trie::RoseLeaf].  This is because you can't prove a leaf is in the tree if
+/// it is adjacent to rose and vice versa.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrieMerkleProofStep {
-    /// Corresponds to [`Trie::Node`]
+    /// Corresponds to [Trie::Node]
     Node {
         hole_index: u8,
         indexed_pointers_with_hole: Vec<(u8, Pointer)>,
     },
-    /// Corresponds to [`Trie::Extension`]
+    /// Corresponds to [Trie::Extension]
     Extension { affix: Bytes },
+    /// Corresponds to the _rose_ in a [Trie::RoseLeaf]
+    RoseLeafRose { leaf_hash: Blake2bHash },
+    /// Corresponds to the _leaf_ in a [Trie::RoseLeaf]
+    RoseLeafLeaf { rose_hash: Blake2bHash },
+    /// Corresponds to the _rose_ in a [Trie::RoseExtension]
+    RoseExtensionRose { extension_hash: Blake2bHash },
+    /// Corresponds to the _extension_ in a [Trie::RoseExtension]
+    RoseExtensionExtension {
+        rose_hash: Blake2bHash,
+        affix: Bytes,
+    },
+    /// Corresponds to the _rose_ in a [Trie::RoseNode]
+    RoseNodeRose { node_hash: Blake2bHash },
+    /// Corresponds to the _node_ in a [Trie::RoseNode]
+    RoseNodeNode {
+        rose_hash: Blake2bHash,
+        hole_index: u8,
+        indexed_pointers_with_hole: Vec<(u8, Pointer)>,
+    },
 }
 
 impl TrieMerkleProofStep {
@@ -55,6 +87,37 @@ impl ToBytes for TrieMerkleProofStep {
                 ret.push(TRIE_MERKLE_PROOF_STEP_EXTENSION_ID);
                 ret.append(&mut affix.to_bytes()?)
             }
+            TrieMerkleProofStep::RoseLeafRose { leaf_hash } => {
+                ret.push(TRIE_MERKLE_PROOF_ROSE_LEAF_ROSE_ID);
+                ret.append(&mut leaf_hash.to_bytes()?)
+            }
+            TrieMerkleProofStep::RoseLeafLeaf { rose_hash } => {
+                ret.push(TRIE_MERKLE_PROOF_ROSE_LEAF_LEAF_ID);
+                ret.append(&mut rose_hash.to_bytes()?)
+            }
+            TrieMerkleProofStep::RoseExtensionRose { extension_hash } => {
+                ret.push(TRIE_MERKLE_PROOF_ROSE_EXTENSION_ROSE_ID);
+                ret.append(&mut extension_hash.to_bytes()?)
+            }
+            TrieMerkleProofStep::RoseExtensionExtension { rose_hash, affix } => {
+                ret.push(TRIE_MERKLE_PROOF_ROSE_EXTENSION_EXTENSION_ID);
+                ret.append(&mut rose_hash.to_bytes()?);
+                ret.append(&mut affix.to_bytes()?)
+            }
+            TrieMerkleProofStep::RoseNodeRose { node_hash } => {
+                ret.push(TRIE_MERKLE_PROOF_ROSE_NODE_ROSE_ID);
+                ret.append(&mut node_hash.to_bytes()?);
+            }
+            TrieMerkleProofStep::RoseNodeNode {
+                rose_hash,
+                hole_index,
+                indexed_pointers_with_hole,
+            } => {
+                ret.push(TRIE_MERKLE_PROOF_STEP_NODE_ID);
+                ret.append(&mut rose_hash.to_bytes()?);
+                ret.push(*hole_index);
+                ret.append(&mut indexed_pointers_with_hole.to_bytes()?)
+            }
         };
         Ok(ret)
     }
@@ -66,10 +129,27 @@ impl ToBytes for TrieMerkleProofStep {
                     hole_index,
                     indexed_pointers_with_hole,
                 } => {
-                    (*hole_index).serialized_length()
-                        + (*indexed_pointers_with_hole).serialized_length()
+                    hole_index.serialized_length() + indexed_pointers_with_hole.serialized_length()
                 }
                 TrieMerkleProofStep::Extension { affix } => affix.serialized_length(),
+                TrieMerkleProofStep::RoseLeafRose { leaf_hash } => leaf_hash.serialized_length(),
+                TrieMerkleProofStep::RoseLeafLeaf { rose_hash } => rose_hash.serialized_length(),
+                TrieMerkleProofStep::RoseExtensionRose { extension_hash } => {
+                    extension_hash.serialized_length()
+                }
+                TrieMerkleProofStep::RoseExtensionExtension { rose_hash, affix } => {
+                    rose_hash.serialized_length() + affix.serialized_length()
+                }
+                TrieMerkleProofStep::RoseNodeRose { node_hash } => node_hash.serialized_length(),
+                TrieMerkleProofStep::RoseNodeNode {
+                    rose_hash,
+                    hole_index,
+                    indexed_pointers_with_hole,
+                } => {
+                    rose_hash.serialized_length()
+                        + hole_index.serialized_length()
+                        + indexed_pointers_with_hole.serialized_length()
+                }
             }
     }
 }
@@ -91,9 +171,51 @@ impl FromBytes for TrieMerkleProofStep {
                 ))
             }
             TRIE_MERKLE_PROOF_STEP_EXTENSION_ID => {
-                let (affix, rem): (_, &[u8]) = FromBytes::from_bytes(rem)?;
+                let (affix, rem): (Bytes, &[u8]) = FromBytes::from_bytes(rem)?;
                 Ok((TrieMerkleProofStep::Extension { affix }, rem))
             }
+            TRIE_MERKLE_PROOF_ROSE_LEAF_ROSE_ID => {
+                let (leaf_hash, rem): (Blake2bHash, &[u8]) = FromBytes::from_bytes(rem)?;
+                Ok((TrieMerkleProofStep::RoseLeafRose { leaf_hash }, rem))
+            }
+            TRIE_MERKLE_PROOF_ROSE_LEAF_LEAF_ID => {
+                let (rose_hash, rem): (Blake2bHash, &[u8]) = FromBytes::from_bytes(rem)?;
+                Ok((TrieMerkleProofStep::RoseLeafLeaf { rose_hash }, rem))
+            }
+            TRIE_MERKLE_PROOF_ROSE_EXTENSION_ROSE_ID => {
+                let (extension_hash, rem): (Blake2bHash, &[u8]) = FromBytes::from_bytes(rem)?;
+                Ok((
+                    TrieMerkleProofStep::RoseExtensionRose { extension_hash },
+                    rem,
+                ))
+            }
+            TRIE_MERKLE_PROOF_ROSE_EXTENSION_EXTENSION_ID => {
+                let (rose_hash, rem): (Blake2bHash, &[u8]) = FromBytes::from_bytes(rem)?;
+                let (affix, rem): (Bytes, &[u8]) = FromBytes::from_bytes(rem)?;
+                Ok((
+                    TrieMerkleProofStep::RoseExtensionExtension { rose_hash, affix },
+                    rem,
+                ))
+            }
+            TRIE_MERKLE_PROOF_ROSE_NODE_ROSE_ID => {
+                let (node_hash, rem): (Blake2bHash, &[u8]) = FromBytes::from_bytes(rem)?;
+                Ok((TrieMerkleProofStep::RoseNodeRose { node_hash }, rem))
+            }
+            TRIE_MERKLE_PROOF_ROSE_NODE_NODE_ID => {
+                let (rose_hash, rem): (Blake2bHash, &[u8]) = FromBytes::from_bytes(rem)?;
+                let (hole_index, rem): (u8, &[u8]) = FromBytes::from_bytes(rem)?;
+                let (indexed_pointers_with_hole, rem): (Vec<(u8, Pointer)>, &[u8]) =
+                    FromBytes::from_bytes(rem)?;
+                Ok((
+                    TrieMerkleProofStep::RoseNodeNode {
+                        rose_hash,
+                        hole_index,
+                        indexed_pointers_with_hole,
+                    },
+                    rem,
+                ))
+            }
+
             _ => Err(bytesrepr::Error::Formatting),
         }
     }
@@ -157,10 +279,7 @@ where
     ///
     /// The steps in this function reflect `operations::rehash`.
     pub fn compute_state_hash(&self) -> Result<Blake2bHash, bytesrepr::Error> {
-        let mut hash = {
-            let leaf_bytes = Trie::leaf(self.key, self.value.to_owned()).to_bytes()?;
-            Blake2bHash::new(&leaf_bytes)
-        };
+        let mut hash = Trie::leaf(self.key, self.value.to_owned()).merkle_hash()?;
 
         for (proof_step_index, proof_step) in self.proof_steps.iter().enumerate() {
             let pointer = if proof_step_index == 0 {
@@ -168,7 +287,7 @@ where
             } else {
                 Pointer::NodePointer(hash)
             };
-            let proof_step_bytes = match proof_step {
+            hash = match proof_step {
                 TrieMerkleProofStep::Node {
                     hole_index,
                     indexed_pointers_with_hole,
@@ -177,13 +296,37 @@ where
                     assert!(hole_index as usize <= RADIX, "hole_index exceeded RADIX");
                     let mut indexed_pointers = indexed_pointers_with_hole.to_owned();
                     indexed_pointers.push((hole_index, pointer));
-                    Trie::<K, V>::node(&indexed_pointers).to_bytes()?
+                    Trie::<K, V>::node(&indexed_pointers).merkle_hash()?
                 }
                 TrieMerkleProofStep::Extension { affix } => {
-                    Trie::<K, V>::extension(affix.clone().into(), pointer).to_bytes()?
+                    Trie::<K, V>::extension(affix.clone().into(), pointer).merkle_hash()?
+                }
+                TrieMerkleProofStep::RoseLeafRose { leaf_hash } => hash_pair(&hash, leaf_hash),
+                TrieMerkleProofStep::RoseLeafLeaf { rose_hash } => hash_pair(rose_hash, &hash),
+                TrieMerkleProofStep::RoseExtensionRose { extension_hash } => {
+                    hash_pair(&hash, extension_hash)
+                }
+                TrieMerkleProofStep::RoseExtensionExtension { rose_hash, affix } => {
+                    let affix_hash =
+                        Trie::<K, V>::extension(affix.clone().into(), pointer).merkle_hash()?;
+                    hash_pair(rose_hash, &affix_hash)
+                }
+                TrieMerkleProofStep::RoseNodeRose { node_hash } => hash_pair(&hash, node_hash),
+                TrieMerkleProofStep::RoseNodeNode {
+                    rose_hash,
+                    hole_index,
+                    indexed_pointers_with_hole,
+                } => {
+                    let node_hash = {
+                        let hole_index = *hole_index;
+                        assert!(hole_index as usize <= RADIX, "hole_index exceeded RADIX");
+                        let mut indexed_pointers = indexed_pointers_with_hole.to_owned();
+                        indexed_pointers.push((hole_index, pointer));
+                        Trie::<K, V>::node(&indexed_pointers).merkle_hash()?
+                    };
+                    hash_pair(&rose_hash, &node_hash)
                 }
             };
-            hash = Blake2bHash::new(&proof_step_bytes);
         }
         Ok(hash)
     }
@@ -239,7 +382,7 @@ mod gens {
     use crate::{
         shared::stored_value::{gens::stored_value_arb, StoredValue},
         storage::trie::{
-            gens::trie_pointer_arb,
+            gens::{blake2b_hash_arb, trie_pointer_arb},
             merkle_proof::{TrieMerkleProof, TrieMerkleProofStep},
             RADIX,
         },
@@ -253,7 +396,7 @@ mod gens {
         prop_oneof![
             (
                 <u8>::arbitrary(),
-                vec((<u8>::arbitrary(), trie_pointer_arb()), POINTERS_SIZE)
+                vec((<u8>::arbitrary(), trie_pointer_arb()), POINTERS_SIZE),
             )
                 .prop_map(|(hole_index, indexed_pointers_with_hole)| {
                     TrieMerkleProofStep::Node {
@@ -261,11 +404,36 @@ mod gens {
                         indexed_pointers_with_hole,
                     }
                 }),
-            vec(<u8>::arbitrary(), AFFIX_SIZE).prop_map(|affix| {
-                TrieMerkleProofStep::Extension {
+            vec(<u8>::arbitrary(), AFFIX_SIZE).prop_map(|affix| TrieMerkleProofStep::Extension {
+                affix: affix.into(),
+            }),
+            blake2b_hash_arb()
+                .prop_map(|leaf_hash| TrieMerkleProofStep::RoseLeafRose { leaf_hash }),
+            blake2b_hash_arb()
+                .prop_map(|rose_hash| TrieMerkleProofStep::RoseLeafLeaf { rose_hash }),
+            blake2b_hash_arb().prop_map(|extension_hash| TrieMerkleProofStep::RoseExtensionRose {
+                extension_hash,
+            }),
+            (blake2b_hash_arb(), vec(<u8>::arbitrary(), AFFIX_SIZE)).prop_map(
+                |(rose_hash, affix)| TrieMerkleProofStep::RoseExtensionExtension {
+                    rose_hash,
                     affix: affix.into(),
-                }
-            })
+                },
+            ),
+            blake2b_hash_arb()
+                .prop_map(|node_hash| TrieMerkleProofStep::RoseNodeRose { node_hash }),
+            (
+                blake2b_hash_arb(),
+                <u8>::arbitrary(),
+                vec((<u8>::arbitrary(), trie_pointer_arb()), POINTERS_SIZE),
+            )
+                .prop_map(|(rose_hash, hole_index, indexed_pointers_with_hole)| {
+                    TrieMerkleProofStep::RoseNodeNode {
+                        rose_hash,
+                        hole_index,
+                        indexed_pointers_with_hole,
+                    }
+                }),
         ]
     }
 

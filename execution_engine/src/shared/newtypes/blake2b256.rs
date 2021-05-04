@@ -115,3 +115,14 @@ impl FromBytes for Blake2bHash {
         FromBytes::from_bytes(bytes).map(|(arr, rem)| (Blake2bHash(arr), rem))
     }
 }
+
+#[cfg(test)]
+mod gens {
+    use proptest::strategy::Strategy;
+
+    use casper_types::gens::u8_slice_32;
+
+    fn blake2b_hash_arb() -> impl Strategy<Value = super::Blake2bHash> {
+        u8_slice_32().prop_map(super::Blake2bHash::from)
+    }
+}

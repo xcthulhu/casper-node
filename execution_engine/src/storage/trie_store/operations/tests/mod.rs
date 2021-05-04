@@ -93,10 +93,9 @@ struct HashedTrie<K, V> {
     trie: Trie<K, V>,
 }
 
-impl<K: ToBytes, V: ToBytes> HashedTrie<K, V> {
+impl<K: ToBytes + Clone, V: ToBytes + Clone> HashedTrie<K, V> {
     pub fn new(trie: Trie<K, V>) -> Result<Self, bytesrepr::Error> {
-        let trie_bytes = trie.to_bytes()?;
-        let hash = Blake2bHash::new(&trie_bytes);
+        let hash = trie.merkle_hash()?;
         Ok(HashedTrie { hash, trie })
     }
 }

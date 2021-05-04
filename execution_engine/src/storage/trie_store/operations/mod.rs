@@ -125,6 +125,36 @@ where
                     return Ok(ReadResult::NotFound);
                 }
             }
+            Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key: leaf_key,
+                leaf_value: leaf_value,
+            } => {
+                let result = if *key == rose_key {
+                    ReadResult::Found(rose_value)
+                } else if *key == leaf_key {
+                    ReadResult::Found(leaf_value)
+                } else {
+                    ReadResult::NotFound
+                };
+                return Ok(result);
+            }
+            Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            } => {
+                todo!()
+            }
+            Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            } => {
+                todo!()
+            }
         }
     }
 }
@@ -224,6 +254,29 @@ where
                 current = next;
                 proof_steps.push_front(TrieMerkleProofStep::extension(affix.into()));
             }
+            Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key: key,
+                leaf_value: value,
+            } => {
+                todo!()
+            }
+            Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            } => {
+                todo!()
+            }
+            Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            } => {
+                todo!()
+            }
         }
     }
 }
@@ -239,8 +292,8 @@ pub fn missing_trie_keys<K, V, T, S, E>(
     mut trie_keys_to_visit: Vec<Blake2bHash>,
 ) -> Result<Vec<Blake2bHash>, E>
 where
-    K: ToBytes + FromBytes + Eq + std::fmt::Debug,
-    V: ToBytes + FromBytes + std::fmt::Debug,
+    K: ToBytes + FromBytes + Eq + std::fmt::Debug + Clone,
+    V: ToBytes + FromBytes + std::fmt::Debug + Clone,
     T: Readable<Handle = S::Handle>,
     S: TrieStore<K, V>,
     S::Error: From<T::Error>,
@@ -254,10 +307,7 @@ where
         }
         let maybe_retrieved_trie: Option<Trie<K, V>> = store.get(txn, &trie_key)?;
         if let Some(trie_value) = &maybe_retrieved_trie {
-            let hash_of_trie_value = {
-                let node_bytes = trie_value.to_bytes()?;
-                Blake2bHash::new(&node_bytes)
-            };
+            let hash_of_trie_value = trie_value.merkle_hash()?;
             if trie_key != hash_of_trie_value {
                 warn!(
                     "Trie key {:?} has corrupted value {:?} (hash of value is {:?}); \
@@ -290,6 +340,29 @@ where
             }
             // If we hit an extension block, add its pointer to the queue
             Some(Trie::Extension { pointer, .. }) => trie_keys_to_visit.push(pointer.into_hash()),
+            Some(Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key: key,
+                leaf_value: value,
+            }) => {
+                todo!()
+            }
+            Some(Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            }) => {
+                todo!()
+            }
+            Some(Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            }) => {
+                todo!()
+            }
         }
     }
     Ok(missing_descendants)
@@ -303,8 +376,8 @@ pub fn check_integrity<K, V, T, S, E>(
     trie_keys_to_visit: Vec<Blake2bHash>,
 ) -> Result<(), E>
 where
-    K: ToBytes + FromBytes + Eq + std::fmt::Debug,
-    V: ToBytes + FromBytes + std::fmt::Debug,
+    K: ToBytes + FromBytes + Eq + std::fmt::Debug + Clone,
+    V: ToBytes + FromBytes + std::fmt::Debug + Clone,
     T: Readable<Handle = S::Handle>,
     S: TrieStore<K, V>,
     S::Error: From<T::Error>,
@@ -327,10 +400,7 @@ where
         }
         let maybe_retrieved_trie: Option<Trie<K, V>> = store.get(txn, &trie_key)?;
         if let Some(trie_value) = &maybe_retrieved_trie {
-            let hash_of_trie_value = {
-                let node_bytes = trie_value.to_bytes()?;
-                Blake2bHash::new(&node_bytes)
-            };
+            let hash_of_trie_value = trie_value.merkle_hash()?;
             if trie_key != hash_of_trie_value {
                 panic!(
                     "Trie key {:?} has corrupted value {:?} (hash of value is {:?})",
@@ -373,6 +443,23 @@ where
                 path.extend_from_slice(affix.as_slice());
                 trie_keys_to_visit.push((path, pointer.into_hash()))
             }
+            Some(Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key,
+                leaf_value,
+            }) => {}
+            Some(Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            }) => {}
+            Some(Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            }) => {}
         }
     }
     Ok(())
@@ -474,6 +561,23 @@ where
                     }
                 }
             }
+            Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key: key,
+                leaf_value: value,
+            } => todo!(),
+            Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            } => todo!(),
+            Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            } => todo!(),
         }
     }
 }
@@ -530,7 +634,7 @@ where
                     pointer_block[idx as usize] = None;
                     Trie::Node { pointer_block }
                 };
-                let trie_key = Blake2bHash::new(&trie_node.to_bytes()?);
+                let trie_key = trie_node.merkle_hash()?;
                 new_elements.push((trie_key, trie_node))
             }
             // The parent is the node which pointed to the leaf we deleted, and that leaf had one or
@@ -547,7 +651,7 @@ where
                         let trie_node = Trie::Node {
                             pointer_block: Box::new(PointerBlock::new()),
                         };
-                        let trie_key = Blake2bHash::new(&trie_node.to_bytes()?);
+                        let trie_key = trie_node.merkle_hash()?;
                         new_elements.push((trie_key, trie_node));
                         break;
                     }
@@ -561,7 +665,7 @@ where
                     (_, None) => {
                         pointer_block[idx as usize] = None;
                         let trie_node = Trie::Node { pointer_block };
-                        let trie_key = Blake2bHash::new(&trie_node.to_bytes()?);
+                        let trie_key = trie_node.merkle_hash()?;
                         new_elements.push((trie_key, trie_node));
                         break;
                     }
@@ -570,7 +674,7 @@ where
                     (Pointer::LeafPointer(..), Some((idx, Trie::Node { mut pointer_block }))) => {
                         pointer_block[idx as usize] = Some(sibling_pointer);
                         let trie_node = Trie::Node { pointer_block };
-                        let trie_key = Blake2bHash::new(&trie_node.to_bytes()?);
+                        let trie_key = trie_node.merkle_hash()?;
                         new_elements.push((trie_key, trie_node))
                     }
                     // The sibling is a leaf and the grandparent is an extension.
@@ -586,9 +690,12 @@ where
                             Some((idx, Trie::Node { mut pointer_block })) => {
                                 pointer_block[idx as usize] = Some(sibling_pointer);
                                 let trie_node = Trie::Node { pointer_block };
-                                let trie_key = Blake2bHash::new(&trie_node.to_bytes()?);
+                                let trie_key = trie_node.merkle_hash()?;
                                 new_elements.push((trie_key, trie_node))
                             }
+                            Some((_, Trie::RoseLeaf { .. })) => todo!(),
+                            Some((_, Trie::RoseNode { .. })) => todo!(),
+                            Some((_, Trie::RoseExtension { .. })) => todo!(),
                         }
                     }
                     // The single sibling is a node or an extension, and a grandparent exists.
@@ -616,7 +723,7 @@ where
                                     affix: vec![sibling_idx].into(),
                                     pointer: sibling_pointer,
                                 };
-                                let trie_key = Blake2bHash::new(&new_extension.to_bytes()?);
+                                let trie_key = new_extension.merkle_hash()?;
                                 new_elements.push((trie_key, new_extension))
                             }
                             // The single sibling is a extension.  We output an extension to replace
@@ -633,10 +740,42 @@ where
                                     affix: new_affix.into(),
                                     pointer,
                                 };
-                                let trie_key = Blake2bHash::new(&new_extension.to_bytes()?);
+                                let trie_key = new_extension.merkle_hash()?;
                                 new_elements.push((trie_key, new_extension))
                             }
+                            Trie::RoseLeaf {
+                                rose_key,
+                                rose_value,
+                                leaf_key: key,
+                                leaf_value: value,
+                            } => {
+                                todo!()
+                            }
+                            Trie::RoseNode {
+                                rose_key,
+                                rose_value,
+                                pointer_block,
+                            } => {
+                                todo!()
+                            }
+                            Trie::RoseExtension {
+                                rose_key,
+                                rose_value,
+                                affix,
+                                pointer,
+                            } => {
+                                todo!()
+                            }
                         }
+                    }
+                    (Pointer::LeafPointer(_), Some((_, Trie::RoseLeaf { .. }))) => {
+                        todo!()
+                    }
+                    (Pointer::LeafPointer(_), Some((_, Trie::RoseNode { .. }))) => {
+                        todo!()
+                    }
+                    (Pointer::LeafPointer(_), Some((_, Trie::RoseExtension { .. }))) => {
+                        todo!()
                     }
                 }
             }
@@ -648,7 +787,7 @@ where
                     pointer_block[idx as usize] = Some(Pointer::NodePointer(*trie_key));
                     Trie::Node { pointer_block }
                 };
-                let trie_key = Blake2bHash::new(&trie_node.to_bytes()?);
+                let trie_key = trie_node.merkle_hash()?;
                 new_elements.push((trie_key, trie_node))
             }
             // The parent is an extension, and we are outputting an extension.  Prepend the parent
@@ -672,7 +811,7 @@ where
                         affix: child_affix.to_owned(),
                         pointer: pointer.to_owned(),
                     };
-                    Blake2bHash::new(&new_extension.to_bytes()?)
+                    new_extension.merkle_hash()?
                 }
             }
             // The parent is an extension and the new element is a pointer block.  The next element
@@ -680,9 +819,30 @@ where
             (Some((trie_key, Trie::Node { .. })), Trie::Extension { affix, .. }) => {
                 let pointer = Pointer::NodePointer(*trie_key);
                 let trie_extension = Trie::Extension { affix, pointer };
-                let trie_key = Blake2bHash::new(&trie_extension.to_bytes()?);
+                let trie_key = trie_extension.merkle_hash()?;
                 new_elements.push((trie_key, trie_extension))
             }
+            (None, Trie::RoseLeaf { .. }) => todo!(),
+            (None, Trie::RoseNode { .. }) => todo!(),
+            (None, Trie::RoseExtension { .. }) => todo!(),
+            (Some((_, Trie::RoseLeaf { .. })), Trie::Extension { .. }) => todo!(),
+            (Some((_, Trie::RoseNode { .. })), Trie::Extension { .. }) => todo!(),
+            (Some((_, Trie::RoseExtension { .. })), Trie::Extension { .. }) => todo!(),
+            (Some((_, Trie::Node { .. })), Trie::RoseLeaf { .. }) => todo!(),
+            (Some((_, Trie::Node { .. })), Trie::RoseNode { .. }) => todo!(),
+            (Some((_, Trie::Node { .. })), Trie::RoseExtension { .. }) => todo!(),
+            (Some((_, Trie::Extension { .. })), Trie::RoseLeaf { .. }) => todo!(),
+            (Some((_, Trie::Extension { .. })), Trie::RoseNode { .. }) => todo!(),
+            (Some((_, Trie::Extension { .. })), Trie::RoseExtension { .. }) => todo!(),
+            (Some((_, Trie::RoseLeaf { .. })), Trie::RoseLeaf { .. }) => todo!(),
+            (Some((_, Trie::RoseLeaf { .. })), Trie::RoseNode { .. }) => todo!(),
+            (Some((_, Trie::RoseLeaf { .. })), Trie::RoseExtension { .. }) => todo!(),
+            (Some((_, Trie::RoseNode { .. })), Trie::RoseLeaf { .. }) => todo!(),
+            (Some((_, Trie::RoseNode { .. })), Trie::RoseNode { .. }) => todo!(),
+            (Some((_, Trie::RoseNode { .. })), Trie::RoseExtension { .. }) => todo!(),
+            (Some((_, Trie::RoseExtension { .. })), Trie::RoseLeaf { .. }) => todo!(),
+            (Some((_, Trie::RoseExtension { .. })), Trie::RoseNode { .. }) => todo!(),
+            (Some((_, Trie::RoseExtension { .. })), Trie::RoseExtension { .. }) => todo!(),
         }
     }
     for (hash, element) in new_elements.iter() {
@@ -706,10 +866,7 @@ where
     V: ToBytes + Clone,
 {
     let mut ret: Vec<(Blake2bHash, Trie<K, V>)> = Vec::new();
-    let mut tip_hash = {
-        let node_bytes = tip.to_bytes()?;
-        Blake2bHash::new(&node_bytes)
-    };
+    let mut tip_hash = tip.merkle_hash()?;
     ret.push((tip_hash, tip.to_owned()));
 
     for (index, parent) in parents.into_iter().rev() {
@@ -723,14 +880,20 @@ where
                         Trie::Leaf { .. } => Pointer::LeafPointer(tip_hash),
                         Trie::Node { .. } => Pointer::NodePointer(tip_hash),
                         Trie::Extension { .. } => Pointer::NodePointer(tip_hash),
+                        Trie::RoseLeaf { .. } => {
+                            todo!()
+                        }
+                        Trie::RoseNode { .. } => {
+                            todo!()
+                        }
+                        Trie::RoseExtension { .. } => {
+                            todo!()
+                        }
                     };
                     pointer_block[index.into()] = Some(pointer);
                     Trie::Node { pointer_block }
                 };
-                tip_hash = {
-                    let node_bytes = tip.to_bytes()?;
-                    Blake2bHash::new(&node_bytes)
-                };
+                tip_hash = tip.merkle_hash()?;
                 ret.push((tip_hash, tip.to_owned()))
             }
             Trie::Extension { affix, pointer } => {
@@ -738,11 +901,31 @@ where
                     let pointer = pointer.update(tip_hash);
                     Trie::Extension { affix, pointer }
                 };
-                tip_hash = {
-                    let extension_bytes = tip.to_bytes()?;
-                    Blake2bHash::new(&extension_bytes)
-                };
+                tip_hash = tip.merkle_hash()?;
                 ret.push((tip_hash, tip.to_owned()))
+            }
+            Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key: key,
+                leaf_value: value,
+            } => {
+                todo!()
+            }
+            Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            } => {
+                todo!()
+            }
+            Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            } => {
+                todo!()
             }
         }
     }
@@ -824,8 +1007,8 @@ fn reparent_leaf<K, V>(
     parents: Parents<K, V>,
 ) -> Result<(Trie<K, V>, Parents<K, V>), bytesrepr::Error>
 where
-    K: ToBytes,
-    V: ToBytes,
+    K: ToBytes + Clone,
+    V: ToBytes + Clone,
 {
     let mut parents = parents;
     let (child_index, parent) = parents.pop().expect("parents should not be empty");
@@ -853,8 +1036,7 @@ where
     // If the affix is non-empty, create an extension node and add it
     // to parents.
     if !affix.is_empty() {
-        let new_node_bytes = new_node.to_bytes()?;
-        let new_node_hash = Blake2bHash::new(&new_node_bytes);
+        let new_node_hash = new_node.merkle_hash()?;
         let new_extension = Trie::extension(affix.to_vec(), Pointer::NodePointer(new_node_hash));
         parents.push((child_index, new_extension));
     }
@@ -907,8 +1089,7 @@ where
             None
         } else {
             let child_extension = Trie::extension(child_extension_affix.to_vec(), pointer);
-            let child_extension_bytes = child_extension.to_bytes()?;
-            let child_extension_hash = Blake2bHash::new(&child_extension_bytes);
+            let child_extension_hash = child_extension.merkle_hash()?;
             Some((child_extension_hash, child_extension))
         };
     // Assemble a new node.
@@ -921,8 +1102,7 @@ where
     };
     // Create a parent extension if necessary
     if !parent_extension_affix.is_empty() {
-        let new_node_bytes = new_node.to_bytes()?;
-        let new_node_hash = Blake2bHash::new(&new_node_bytes);
+        let new_node_hash = new_node.merkle_hash()?;
         let parent_extension = Trie::extension(
             parent_extension_affix.to_vec(),
             Pointer::NodePointer(new_node_hash),
@@ -1019,6 +1199,9 @@ where
                         rehash(new_leaf, parents)?
                     }
                 }
+                Trie::RoseLeaf { .. } => todo!(),
+                Trie::RoseNode { .. } => todo!(),
+                Trie::RoseExtension { .. } => todo!(),
             };
             if new_elements.is_empty() {
                 return Ok(WriteResult::AlreadyExists);
@@ -1047,10 +1230,7 @@ where
     S::Error: From<T::Error>,
     E: From<S::Error> + From<bytesrepr::Error>,
 {
-    let trie_hash = {
-        let node_bytes = trie.to_bytes()?;
-        Blake2bHash::new(&node_bytes)
-    };
+    let trie_hash = trie.merkle_hash()?;
     store.put(txn, &trie_hash, trie)?;
     Ok(trie_hash)
 }
@@ -1184,6 +1364,29 @@ where
                         debug_assert!({ matches!(&maybe_next_trie, Some(Trie::Node { .. })) });
                         path.extend(affix);
                     }
+                }
+                Trie::RoseLeaf {
+                    rose_key,
+                    rose_value,
+                    leaf_key: key,
+                    leaf_value: value,
+                } => {
+                    todo!()
+                }
+                Trie::RoseNode {
+                    rose_key,
+                    rose_value,
+                    pointer_block,
+                } => {
+                    todo!()
+                }
+                Trie::RoseExtension {
+                    rose_key,
+                    rose_value,
+                    affix,
+                    pointer,
+                } => {
+                    todo!()
                 }
             }
 

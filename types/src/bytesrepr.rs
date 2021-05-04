@@ -115,6 +115,9 @@ pub enum Error {
     /// Out of memory error.
     #[cfg_attr(feature = "std", error("Serialization error: out of memory"))]
     OutOfMemory,
+    /* /// Serialization not supported for variant.
+     * #[cfg_attr(feature = "std", error("Serialization error: unsupported variant"))]
+     * UnsupportedVariant, */
 }
 
 /// Deserializes `bytes` into an instance of `T`.

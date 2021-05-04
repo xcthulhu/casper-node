@@ -32,10 +32,7 @@ where
     )?;
 
     for (index, parent) in parents.into_iter().rev() {
-        let expected_tip_hash = {
-            let tip_bytes = tip.to_bytes().unwrap();
-            Blake2bHash::new(&tip_bytes)
-        };
+        let expected_tip_hash = tip.merkle_hash()?;
         match parent {
             Trie::Leaf { .. } => panic!("parents should not contain any leaves"),
             Trie::Node { pointer_block } => {

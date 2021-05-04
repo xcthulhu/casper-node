@@ -12,8 +12,9 @@ use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
-use crate::shared::newtypes::Blake2bHash;
 use casper_types::bytesrepr::{self, Bytes, FromBytes, ToBytes, U8_SERIALIZED_LENGTH};
+
+use crate::shared::newtypes::Blake2bHash;
 
 #[cfg(test)]
 pub mod gens;
@@ -319,12 +320,117 @@ impl ::std::fmt::Debug for PointerBlock {
     }
 }
 
-/// Represents a Merkle Trie
+/// Represents a Merkle (Maybe) Rose-Trie
+/// For information on Merkle Patricia Tries: https://eth.wiki/fundamentals/patricia-tree
+/// For information on Rose-Trees, see: https://en.wikipedia.org/wiki/Rose_tree
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Trie<K, V> {
-    Leaf { key: K, value: V },
-    Node { pointer_block: Box<PointerBlock> },
-    Extension { affix: Bytes, pointer: Pointer },
+    // Non-rose variants do not have a KV pair associated with them
+    Leaf {
+        key: K,
+        value: V,
+    },
+    Node {
+        pointer_block: Box<PointerBlock>,
+    },
+    Extension {
+        affix: Bytes,
+        pointer: Pointer,
+    },
+    // Rose variants have a KV pair associated with them
+    RoseLeaf {
+        rose_key: K,
+        rose_value: V,
+        // We have then invariant: key.to_bytes().len() > rose_key.to_bytes().len()
+        leaf_key: K,
+        leaf_value: V,
+    },
+    RoseNode {
+        rose_key: K,
+        rose_value: V,
+        pointer_block: Box<PointerBlock>,
+    },
+    RoseExtension {
+        rose_key: K,
+        rose_value: V,
+        affix: Bytes,
+        pointer: Pointer,
+    },
+}
+
+/// Hash a pair of [Blake2bHash]es together.
+pub fn hash_pair(hash1: &Blake2bHash, hash2: &Blake2bHash) -> Blake2bHash {
+    let mut to_hash = [0; Blake2bHash::LENGTH * 2];
+    to_hash[..Blake2bHash::LENGTH].copy_from_slice(&hash1.value());
+    to_hash[Blake2bHash::LENGTH..].copy_from_slice(&hash2.value());
+    Blake2bHash::new(&to_hash)
+}
+
+impl<K, V> Trie<K, V> {
+    /// Computes the hash of a [Trie]. This is used in constructing the trie-store and Merkle
+    /// proofs of its entries.
+    pub fn merkle_hash(&self) -> Result<Blake2bHash, bytesrepr::Error>
+    where
+        K: ToBytes + Clone,
+        V: ToBytes + Clone,
+    {
+        match self {
+            Trie::Leaf { .. } | Trie::Node { .. } | Trie::Extension { .. } => {
+                let node_bytes = self.to_bytes()?;
+                Ok(Blake2bHash::new(&node_bytes))
+            }
+            Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key,
+                leaf_value,
+            } => {
+                let rose_hash = Trie::Leaf {
+                    key: rose_key.clone(),
+                    value: rose_value.clone(),
+                }
+                .merkle_hash()?;
+                let leaf_hash = (Trie::Leaf {
+                    key: leaf_key.clone(),
+                    value: leaf_value.clone(),
+                })
+                .merkle_hash()?;
+                Ok(hash_pair(&rose_hash, &leaf_hash))
+            }
+            Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            } => {
+                let rose_hash = Trie::Leaf {
+                    key: rose_key.clone(),
+                    value: rose_value.clone(),
+                }
+                .merkle_hash()?;
+                let node_hash = Trie::Node::<K, V> {
+                    pointer_block: pointer_block.clone(),
+                }
+                .merkle_hash()?;
+                Ok(hash_pair(&rose_hash, &node_hash))
+            }
+            Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            } => {
+                let rose = Trie::Leaf {
+                    key: rose_key.clone(),
+                    value: rose_value.clone(),
+                };
+                let extension = Trie::Extension::<K, V> {
+                    affix: affix.clone(),
+                    pointer: pointer.clone(),
+                };
+                Ok(hash_pair(&rose.merkle_hash()?, &extension.merkle_hash()?))
+            }
+        }
+    }
 }
 
 impl<K, V> Display for Trie<K, V>
@@ -343,6 +449,9 @@ impl<K, V> Trie<K, V> {
             Trie::Leaf { .. } => 0,
             Trie::Node { .. } => 1,
             Trie::Extension { .. } => 2,
+            Trie::RoseLeaf { .. } => 3,
+            Trie::RoseNode { .. } => 4,
+            Trie::RoseExtension { .. } => 5,
         }
     }
 
@@ -395,6 +504,37 @@ where
                 ret.append(&mut affix.to_bytes()?);
                 ret.append(&mut pointer.to_bytes()?);
             }
+            Trie::RoseLeaf {
+                rose_key,
+                rose_value,
+                leaf_key: key,
+                leaf_value: value,
+            } => {
+                ret.append(&mut rose_key.to_bytes()?);
+                ret.append(&mut rose_value.to_bytes()?);
+                ret.append(&mut key.to_bytes()?);
+                ret.append(&mut value.to_bytes()?);
+            }
+            Trie::RoseNode {
+                rose_key,
+                rose_value,
+                pointer_block,
+            } => {
+                ret.append(&mut rose_key.to_bytes()?);
+                ret.append(&mut rose_value.to_bytes()?);
+                ret.append(&mut pointer_block.to_bytes()?);
+            }
+            Trie::RoseExtension {
+                rose_key,
+                rose_value,
+                affix,
+                pointer,
+            } => {
+                ret.append(&mut rose_key.to_bytes()?);
+                ret.append(&mut rose_value.to_bytes()?);
+                ret.append(&mut affix.to_bytes()?);
+                ret.append(&mut pointer.to_bytes()?);
+            }
         }
         Ok(ret)
     }
@@ -406,6 +546,37 @@ where
                 Trie::Node { pointer_block } => pointer_block.serialized_length(),
                 Trie::Extension { affix, pointer } => {
                     affix.serialized_length() + pointer.serialized_length()
+                }
+                Trie::RoseLeaf {
+                    rose_key,
+                    rose_value,
+                    leaf_key: key,
+                    leaf_value: value,
+                } => {
+                    rose_key.serialized_length()
+                        + rose_value.serialized_length()
+                        + key.serialized_length()
+                        + value.serialized_length()
+                }
+                Trie::RoseNode {
+                    rose_key,
+                    rose_value,
+                    pointer_block,
+                } => {
+                    rose_key.serialized_length()
+                        + rose_value.serialized_length()
+                        + pointer_block.serialized_length()
+                }
+                Trie::RoseExtension {
+                    rose_key,
+                    rose_value,
+                    affix,
+                    pointer,
+                } => {
+                    rose_key.serialized_length()
+                        + rose_value.serialized_length()
+                        + affix.serialized_length()
+                        + pointer.serialized_length()
                 }
             }
     }
@@ -446,12 +617,14 @@ pub(crate) mod operations {
 
     /// Creates a tuple containing an empty root hash and an empty root (a node
     /// with an empty pointer block)
-    pub fn create_hashed_empty_trie<K: ToBytes, V: ToBytes>(
-    ) -> Result<(Blake2bHash, Trie<K, V>), bytesrepr::Error> {
+    pub fn create_hashed_empty_trie<K, V>() -> Result<(Blake2bHash, Trie<K, V>), bytesrepr::Error>
+    where
+        K: ToBytes + Clone,
+        V: ToBytes + Clone,
+    {
         let root: Trie<K, V> = Trie::Node {
             pointer_block: Default::default(),
         };
-        let root_bytes: Vec<u8> = root.to_bytes()?;
-        Ok((Blake2bHash::new(&root_bytes), root))
+        Ok((root.merkle_hash()?, root))
     }
 }

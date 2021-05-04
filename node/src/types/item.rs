@@ -66,8 +66,8 @@ impl Item for Trie<Key, StoredValue> {
     const ID_IS_COMPLETE_ITEM: bool = false;
 
     fn id(&self) -> Self::Id {
-        let node_bytes = self.to_bytes().expect("Could not serialize trie to bytes");
-        Blake2bHash::new(&node_bytes)
+        self.merkle_hash()
+            .expect("Could not compute hash of trie-node")
     }
 }
 

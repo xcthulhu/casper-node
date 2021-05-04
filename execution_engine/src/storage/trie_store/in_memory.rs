@@ -16,8 +16,8 @@
 //! let leaf_2 = Trie::Leaf { key: Bytes::from(vec![1u8, 0, 0]), value: Bytes::from(b"val_2".to_vec()) };
 //!
 //! // Get their hashes
-//! let leaf_1_hash = Blake2bHash::new(&leaf_1.to_bytes().unwrap());
-//! let leaf_2_hash = Blake2bHash::new(&leaf_2.to_bytes().unwrap());
+//! let leaf_1_hash = leaf_1.merkle_hash().unwrap();
+//! let leaf_2_hash = leaf_2.merkle_hash().unwrap();
 //!
 //! // Create a node
 //! let node: Trie<Bytes, Bytes> = {
@@ -29,7 +29,7 @@
 //! };
 //!
 //! // Get its hash
-//! let node_hash = Blake2bHash::new(&node.to_bytes().unwrap());
+//! let node_hash = node.merkle_hash().unwrap();
 //!
 //! // Create the environment and the store. For both the in-memory and
 //! // LMDB-backed implementations, the environment is the source of
