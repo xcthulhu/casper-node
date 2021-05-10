@@ -1,9 +1,11 @@
+mod bad_variable_length_keys;
 mod delete;
 mod keys;
 mod proptests;
 mod read;
 mod scan;
 mod synchronize;
+mod variable_length_keys;
 mod write;
 
 use std::{collections::HashMap, convert};
