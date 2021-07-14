@@ -5,7 +5,6 @@ mod operations;
 mod types;
 
 use std::{
-    collections::VecDeque,
     fmt::{self, Debug, Formatter},
     sync::Arc,
     time::Instant,
@@ -50,6 +49,7 @@ use crate::{
     utils::WithDir,
     NodeRng, StorageConfig,
 };
+use std::collections::BTreeMap;
 
 /// State to use to construct the next block in the blockchain. Includes the state root hash for the
 /// execution engine as well as certain values the next header will be based on.
@@ -108,7 +108,7 @@ pub struct ContractRuntime {
     protocol_version: ProtocolVersion,
 
     /// Finalized blocks waiting for their pre-state hash to start executing.
-    exec_queue: VecDeque<(FinalizedBlock, Vec<Deploy>)>,
+    exec_queue: BTreeMap<u64, (FinalizedBlock, Vec<Deploy>)>,
 }
 
 impl Debug for ContractRuntime {
@@ -451,7 +451,8 @@ where
                         deploys,
                     )
                 } else {
-                    self.exec_queue.push_back((finalized_block, deploys));
+                    self.exec_queue
+                        .insert(finalized_block.height(), (finalized_block, deploys));
                     Effects::new()
                 }
             }
@@ -536,7 +537,7 @@ impl ContractRuntime {
         Ok(ContractRuntime {
             execution_pre_state,
             protocol_version,
-            exec_queue: VecDeque::new(),
+            exec_queue: BTreeMap::new(),
             engine_state,
             metrics,
         })
@@ -621,7 +622,10 @@ impl ContractRuntime {
         }
 
         // If the child is already finalized, start execution.
-        if let Some((finalized_block, deploys)) = self.exec_queue.pop_front() {
+        if let Some((finalized_block, deploys)) = self
+            .exec_queue
+            .remove(&self.execution_pre_state.next_block_height)
+        {
             effects.extend(
                 effect_builder
                     .enqueue_block_for_execution(finalized_block, deploys)
